@@ -1,0 +1,61 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---- Virtual environments ----
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ---- Testing / coverage / type checking ----
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ---- Frozen app output (PyInstaller / Nuitka) ----
+*.spec
+*.manifest
+build-*/
+
+# ---- Runtime / user data ----
+# Local config written by the settings app; never commit a user's own settings.
+config.local.*
+*.log
+logs/
+
+# ---- Editors / IDEs ----
+.idea/
+.idea
+.vscode/
+.vscode
+*.swp
+*.swo
+*~
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini
