@@ -7,11 +7,12 @@ what takes it out. There is no toggle anywhere in this UI, by design.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetricsF, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -19,26 +20,31 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFontComboBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from .. import autostart
 from ..config import (
     OPACITY_BACKGROUND,
     OPACITY_WINDOW,
     Config,
     available_shells,
+    config_dir,
     config_path,
 )
 from ..ipc import SettingsClient
+from ..platform_info import DISPLAY_NAME, icon_path, widget_launcher
 
 
 class SettingsWindow(QWidget):
@@ -48,7 +54,10 @@ class SettingsWindow(QWidget):
         self._path = path
         self._updating = False  # guards against feedback loops
 
-        self.setWindowTitle("Terminal Widget Settings")
+        self.setWindowTitle(f"{DISPLAY_NAME} Settings")
+        icon = icon_path()
+        if icon.exists():
+            self.setWindowIcon(QIcon(str(icon)))
         self.setMinimumWidth(420)
 
         self.client = SettingsClient(self)
@@ -58,14 +67,32 @@ class SettingsWindow(QWidget):
 
         root = QVBoxLayout(self)
         root.addWidget(self._build_status())
-        root.addWidget(self._build_geometry())
-        root.addWidget(self._build_shell())
-        root.addWidget(self._build_appearance())
-        root.addWidget(self._build_behaviour())
-        root.addStretch(1)
+
+        # The groups add up to more height than a short screen has, and a
+        # squeezed QFormLayout overlaps its own rows rather than clipping.
+        # Scrolling keeps every control reachable at any window height.
+        inner = QWidget()
+        stack = QVBoxLayout(inner)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(self._build_geometry())
+        stack.addWidget(self._build_shell())
+        stack.addWidget(self._build_appearance())
+        stack.addWidget(self._build_behaviour())
+        stack.addWidget(self._build_config_location())
+        stack.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root.addWidget(scroll, 1)
+
         root.addLayout(self._build_buttons())
+        self.resize(460, 700)
 
         self._load_into_ui()
+        self._refresh_autostart()
         self.client.start()
         self._on_disconnected()
 
@@ -182,6 +209,7 @@ class SettingsWindow(QWidget):
     def _build_behaviour(self) -> QGroupBox:
         box = QGroupBox("Behaviour")
         form = QFormLayout(box)
+
         self.check_history = QCheckBox("Keep shell history separate")
         self.check_history.setToolTip(
             "Commands typed in the widget go to its own history file instead "
@@ -189,7 +217,100 @@ class SettingsWindow(QWidget):
         )
         self.check_history.toggled.connect(self._on_ui_changed)
         form.addRow("History", self.check_history)
+
+        # Autostart is an OS-level action, not a config field: it is applied
+        # the moment it is toggled and it never round-trips through Config.
+        self.check_autostart = QCheckBox("Start automatically on login")
+        self.check_autostart.toggled.connect(self._on_autostart_toggled)
+        form.addRow("Startup", self.check_autostart)
+
+        self.autostart_note = QLabel()
+        self.autostart_note.setWordWrap(True)
+        self.autostart_note.setStyleSheet("color: palette(mid);")
+        form.addRow("", self.autostart_note)
         return box
+
+    def _build_config_location(self) -> QGroupBox:
+        box = QGroupBox("Configuration")
+        form = QFormLayout(box)
+
+        path_label = QLabel(str(self._path or config_path()))
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        path_label.setStyleSheet("color: palette(mid);")
+        form.addRow("File", path_label)
+
+        button = QPushButton("Open config folder")
+        button.clicked.connect(self._open_config_folder)
+        form.addRow("", button)
+        return box
+
+    # -- Autostart ----------------------------------------------------
+
+    def _refresh_autostart(self) -> None:
+        """Show what the OS actually reports, not what we last set."""
+        supported, reason = autostart.is_supported()
+        launcher = widget_launcher()
+
+        self.check_autostart.blockSignals(True)
+        if not supported:
+            self.check_autostart.setChecked(False)
+            self.check_autostart.setEnabled(False)
+            self.autostart_note.setText(reason)
+        elif launcher is None:
+            self.check_autostart.setChecked(autostart.is_enabled())
+            self.check_autostart.setEnabled(False)
+            self.autostart_note.setText(
+                "Available once the widget is installed -- running from a "
+                "source checkout gives no stable path to register."
+            )
+        else:
+            self.check_autostart.setEnabled(True)
+            self.check_autostart.setChecked(autostart.is_enabled())
+            self.autostart_note.setText(autostart.describe())
+        self.check_autostart.blockSignals(False)
+
+    def _on_autostart_toggled(self, checked: bool) -> None:
+        launcher = widget_launcher()
+        if launcher is None:
+            self._refresh_autostart()
+            return
+        try:
+            if checked:
+                autostart.enable(launcher)
+            else:
+                autostart.disable()
+        except OSError as exc:
+            # Never leave the checkbox claiming a state that is not real.
+            self.status.setText(f"Could not change autostart: {exc}")
+            self.status.setStyleSheet("color: #c62828;")
+        self._refresh_autostart()
+
+    def _open_config_folder(self) -> None:
+        directory = (self._path.parent if self._path else config_dir())
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.status.setText(f"Could not create {directory}: {exc}")
+            self.status.setStyleSheet("color: #c62828;")
+            return
+        url = QUrl.fromLocalFile(str(directory))
+        if QDesktopServices.openUrl(url):
+            return
+        # Qt declines in some minimal environments; fall back to the tools
+        # each platform ships with.
+        import subprocess
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(directory))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(directory)])
+            else:
+                subprocess.Popen(["xdg-open", str(directory)])
+        except (OSError, AttributeError) as exc:
+            self.status.setText(f"Could not open {directory}: {exc}")
+            self.status.setStyleSheet("color: #c62828;")
 
     def _build_buttons(self) -> QHBoxLayout:
         row = QHBoxLayout()

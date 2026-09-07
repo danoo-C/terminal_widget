@@ -10,10 +10,11 @@ connection state. This module only implements the two behaviours.
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .config import OPACITY_BACKGROUND, Config, environment_for, resolve_shell
+from .platform_info import DISPLAY_NAME, icon_path
 from .renderer import TerminalView
 from .session import TerminalSession
 
@@ -70,7 +71,10 @@ class WidgetWindow(QWidget):
         self._drag_origin = None
         self._translucent = False
 
-        self.setWindowTitle("terminal_widget")
+        self.setWindowTitle(DISPLAY_NAME)
+        icon = icon_path()
+        if icon.exists():
+            self.setWindowIcon(QIcon(str(icon)))
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setMouseTracking(True)
 

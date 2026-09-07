@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terminal-widget"
+version = "0.2.0"
+description = "A borderless desktop terminal widget with a separate settings app."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Daniel Danko" }]
+keywords = ["terminal", "widget", "desktop", "pyte", "qt"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Terminals :: Terminal Emulators/X Terminals",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "pyte>=0.8.1",
+    "ptyprocess>=0.7.0 ; sys_platform != 'win32'",
+    "pywinpty>=2.0.0 ; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyright>=1.1"]
+
+# Both are GUI programs. On Windows a [project.scripts] entry point produces a
+# console-attached launcher, which flashes a black window every time it starts
+# -- fatal for a desktop widget. gui-scripts produces a pythonw-backed one.
+[project.gui-scripts]
+terminal-widget = "terminal_widget.__main__:main"
+terminal-widget-settings = "terminal_widget.settings.__main__:main"
+
+# A console entry point kept deliberately, for troubleshooting: it is the only
+# way to see tracebacks and Qt warnings on Windows.
+[project.scripts]
+terminal-widget-debug = "terminal_widget.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["terminal_widget*"]
+
+[tool.setuptools.package-data]
+terminal_widget = ["assets/*.png", "assets/*.ico", "assets/*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["terminal_widget", "tests", "install.py", "tools"]
+# Both platforms are targets, and winreg only exists on one of them. Without
+# this, every registry call is an error when checking from Linux.
+pythonPlatform = "All"

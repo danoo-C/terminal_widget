@@ -9,10 +9,11 @@ free of UI clutter.
 
 Runs on **Linux** and **Windows**.
 
-> **Status: both apps work.** The widget spawns a shell, renders it, and takes
-> input; the settings app drives it live over a local socket. Opening settings
-> puts the widget into config mode and closing settings takes it out, exactly
-> as described below. Not yet verified on Windows.
+> **Status: installable and working on Linux.** One command installs
+> everything -- a private environment, launcher entries, optional autostart,
+> and an uninstaller. The widget and settings app both work, and 98 tests
+> cover them. **Not yet verified on Windows:** the code is there and the paths
+> are right, but it has never been run.
 
 ---
 
@@ -158,9 +159,25 @@ shell uses. A widget you type the occasional command into should not be
 rewriting the history of the terminal you actually work in. Turn it off to
 share one history with everything else.
 
+| Setting | Type | Notes |
+| --- | --- | --- |
+| Start automatically on login | on/off | Applied immediately, not on Save. |
+
+Autostart is an operating-system setting, not a config field, so the checkbox
+reads the real state rather than a remembered one -- an XDG autostart entry on
+Linux, a per-user `Run` registry value on Windows. Neither needs administrator
+rights. It is disabled, with the reason shown, when the widget is running from
+a source checkout (no stable path to register) or under WSL (no persistent
+desktop session for it to run in).
+
+### Configuration
+
+Shows where the config file lives, with an **Open config folder** button that
+opens it in the system file manager.
+
 ---
 
-## Planned architecture
+## Architecture
 
 The hard part of a cross-platform terminal widget is that "spawn a terminal" means
 two very different things on Linux and Windows. The plan is to **emulate the
@@ -205,7 +222,7 @@ The connection dropping **is** the "settings app closed" signal, which means an
 ordinary quit and a crash both correctly return the widget to locked mode. The
 widget must never get stuck in config mode because the settings app died.
 
-### Proposed dependencies
+### Dependencies
 
 | Package | Role |
 | --- | --- |
@@ -214,37 +231,48 @@ widget must never get stuck in config mode because the settings app died.
 | `ptyprocess` | PTY handling on Linux. |
 | `pywinpty` | ConPTY handling on Windows. |
 
-None of these are installed yet — see below.
-
 ---
 
-## Getting started
+## Installing
 
-Requires **Python 3.11+** (developed against 3.13).
-
-### Linux
+Requires **Python 3.11+** (developed against 3.13). Nothing needs administrator
+rights, and nothing is installed outside your home directory.
 
 ```bash
-git clone https://github.com/<you>/terminal_widget.git
+git clone https://github.com/danoo-C/terminal_widget.git
 cd terminal_widget
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
+python3 install.py
 ```
 
-### Windows (PowerShell)
+On Windows, `py install.py`.
 
-```powershell
-git clone https://github.com/<you>/terminal_widget.git
-cd terminal_widget
+That opens a graphical installer which creates a private environment, installs
+the application into it, adds a Start Menu or application-launcher entry, and
+optionally enables autostart. It also writes an uninstaller.
 
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install --upgrade pip
+`install.py` uses tkinter, which ships with the official Windows Python. On
+Linux it is usually one package away (`sudo apt install python3-tk`); if it is
+missing, the installer falls back to a text version and tells you the command.
+
+### Installer options
+
+```
+python3 install.py --cli          text installer instead of the GUI
+python3 install.py --dry-run      print every action, change nothing
+python3 install.py --yes          unattended, no prompts
+python3 install.py --prefix PATH  install somewhere other than the default
+python3 install.py --uninstall    remove it again
 ```
 
-The `.venv/` directory is git-ignored — each machine creates its own.
+| | Linux | Windows |
+| --- | --- | --- |
+| Installed to | `~/.local/share/terminal-widget/` | `%LOCALAPPDATA%\TerminalWidget\` |
+| Shortcuts | `~/.local/share/applications/` | Start Menu |
+| Autostart | `~/.config/autostart/` | `HKCU\...\CurrentVersion\Run` |
+| **Config (never touched)** | `~/.config/terminal_widget/` | `%APPDATA%\terminal_widget\` |
+
+Configuration lives outside the install directory on purpose, so reinstalling
+keeps the widget exactly where you put it.
 
 ### System dependencies (Linux only)
 
@@ -256,14 +284,27 @@ sudo apt install libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
     libxkbcommon-x11-0
 ```
 
-Without these, Qt fails with `libEGL.so.1: cannot open shared object file` or
-`Could not load the Qt platform plugin "xcb"`. Windows needs no equivalent step.
+The installer checks for these and stops with the exact command for your
+distribution if they are missing, rather than leaving you with an install that
+crashes on launch. Windows needs no equivalent step.
 
-### Running
+### Removing it
 
 ```bash
-python -m terminal_widget            # the widget
-python -m terminal_widget.settings   # the settings app
+python3 ~/.local/share/terminal-widget/uninstall.py
+```
+
+This removes only what the install manifest records. Your settings are kept
+unless you pass `--purge`.
+
+## Running
+
+After installing, launch **Terminal Widget Settings** from the Start Menu or
+application launcher, or run the commands directly:
+
+```bash
+~/.local/share/terminal-widget/venv/bin/terminal-widget
+~/.local/share/terminal-widget/venv/bin/terminal-widget-settings
 ```
 
 Start the widget first, then open settings whenever you want to move, resize or
@@ -271,39 +312,51 @@ reconfigure it. The settings app can also launch the widget itself, and if you
 open settings with no widget running it still edits the config file for next
 time.
 
-### Tests
+## Developing
 
 ```bash
-pip install pytest
-python -m pytest tests/
+python3 -m venv .venv
+source .venv/bin/activate        # .venv\Scripts\Activate.ps1 on Windows
+pip install -e ".[dev]"
+
+python -m pytest tests/          # 98 tests, no display needed
+python -m pyright                # type checking
+python -m terminal_widget        # run from source
+python -m terminal_widget.settings
 ```
 
-The suite runs on Qt's offscreen platform, so it needs no display.
+The test suite runs on Qt's offscreen platform. Tests that need a local socket
+skip themselves where the environment forbids binding one.
 
-## Planned layout
+## Layout
 
 ```
 terminal_widget/
+├── install.py             # the installer, GUI and CLI
+├── pyproject.toml         # packaging and entry points
 ├── terminal_widget/
-│   ├── __main__.py        # widget entry point                    [done]
-│   ├── window.py          # frameless window; the two modes       [done]
-│   ├── renderer.py        # draws the pyte screen buffer          [done]
-│   ├── session.py         # shell lifecycle + reader thread       [done]
-│   ├── keys.py            # Qt key events -> escape sequences     [done]
-│   ├── config.py          # load / save / defaults / shells       [done]
-│   ├── pty/
-│   │   ├── base.py        # the backend interface                 [done]
-│   │   ├── posix.py       # ptyprocess backend                    [done]
-│   │   └── windows.py     # pywinpty backend            [done, untested]
-│   ├── ipc.py             # local socket to the settings app      [done]
-│   └── settings/
-│       └── __main__.py    # settings app entry point              [done]
-├── tests/                 # 70 tests, offscreen                   [done]
+│   ├── __main__.py        # widget entry point
+│   ├── window.py          # frameless window; the two modes
+│   ├── renderer.py        # draws the pyte screen buffer
+│   ├── session.py         # shell lifecycle + reader thread
+│   ├── keys.py            # Qt key events -> escape sequences
+│   ├── config.py          # load / save / defaults / shells
+│   ├── platform_info.py   # platform facts, stdlib only
+│   ├── ipc.py             # local socket to the settings app
+│   ├── pty/               # ptyprocess (Linux) / pywinpty (Windows)
+│   ├── autostart/         # XDG entry (Linux) / Run key (Windows)
+│   ├── assets/            # application icon
+│   └── settings/          # the settings app
+├── tools/make_icon.py     # regenerates the icon
+├── tests/                 # 98 tests, offscreen
 ├── LICENSE
 └── README.md
 ```
 
-Config will live in the platform-conventional spot — `~/.config/terminal_widget/`
+`platform_info.py` and `autostart/` are deliberately stdlib-only: the installer
+imports them before any dependency exists.
+
+Config lives in the platform-conventional spot — `~/.config/terminal_widget/`
 on Linux, `%APPDATA%\terminal_widget\` on Windows.
 
 ## Known unknowns
@@ -328,7 +381,8 @@ Things that will need deciding or discovering as the code gets written:
   there is no scrollbar and no obvious place to put one.
 - **Shell exit.** The widget currently closes when the shell exits. Respawning
   or showing a message may suit a permanent desktop widget better.
-- **Windows.** The ConPTY backend is written but has never been run on Windows.
+- **Windows.** Nothing has ever been run on Windows -- not the ConPTY backend,
+  not the installer, not the Start Menu shortcuts or the Run-key autostart.
 
 ## License
 
