@@ -18,7 +18,9 @@ class WindowsPty(PtyBackend):
     def spawn(
         self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
     ) -> None:
-        from winpty import PtyProcess  # imported late: Windows-only dependency
+        # Imported late, and unresolvable off Windows: pywinpty only installs
+        # there, so a type checker running on Linux cannot see it.
+        from winpty import PtyProcess  # type: ignore[import-not-found]
 
         env = env or dict(os.environ)
         # pywinpty takes a command line, not an argv list. Anything needing

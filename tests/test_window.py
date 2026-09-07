@@ -8,12 +8,12 @@ from terminal_widget.config import OPACITY_BACKGROUND, OPACITY_WINDOW, Config
 
 def press_at(window, x, y):
     e = QMouseEvent(
-        QEvent.MouseButtonPress,
+        QEvent.Type.MouseButtonPress,
         QPointF(x, y),
         window.mapToGlobal(QPoint(x, y)),
-        Qt.LeftButton,
-        Qt.LeftButton,
-        Qt.NoModifier,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
     )
     window.view.mousePressEvent(e)
     return e
@@ -52,7 +52,7 @@ def test_locked_hides_the_overlay(window):
 
 def test_locked_uses_an_ibeam(window):
     window.set_config_mode(False)
-    assert window.view.cursor().shape() == Qt.IBeamCursor
+    assert window.view.cursor().shape() == Qt.CursorShape.IBeamCursor
 
 
 # -- Config mode ------------------------------------------------------
@@ -73,12 +73,12 @@ def test_config_shows_the_overlay(window):
 def test_config_uses_an_arrow(window):
     """An I-beam would misrepresent what a click does in config mode."""
     window.set_config_mode(True)
-    assert window.view.cursor().shape() == Qt.ArrowCursor
+    assert window.view.cursor().shape() == Qt.CursorShape.ArrowCursor
 
 
 def test_overlay_ignores_the_mouse(window):
     """The affordance must never intercept a drag."""
-    assert window._overlay.testAttribute(Qt.WA_TransparentForMouseEvents)
+    assert window._overlay.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
 
 def test_mode_toggle_is_idempotent(window):
@@ -94,15 +94,15 @@ def test_mode_toggle_is_idempotent(window):
 
 
 def test_edges_detected_at_borders(window):
-    assert window._edges_at(QPoint(1, 150)) & Qt.LeftEdge
-    assert window._edges_at(QPoint(window.width() - 1, 150)) & Qt.RightEdge
-    assert window._edges_at(QPoint(300, 1)) & Qt.TopEdge
-    assert window._edges_at(QPoint(300, window.height() - 1)) & Qt.BottomEdge
+    assert window._edges_at(QPoint(1, 150)) & Qt.Edge.LeftEdge
+    assert window._edges_at(QPoint(window.width() - 1, 150)) & Qt.Edge.RightEdge
+    assert window._edges_at(QPoint(300, 1)) & Qt.Edge.TopEdge
+    assert window._edges_at(QPoint(300, window.height() - 1)) & Qt.Edge.BottomEdge
 
 
 def test_corner_reports_two_edges(window):
     edges = window._edges_at(QPoint(1, 1))
-    assert edges & Qt.LeftEdge and edges & Qt.TopEdge
+    assert edges & Qt.Edge.LeftEdge and edges & Qt.Edge.TopEdge
 
 
 def test_middle_is_not_an_edge(window):
@@ -179,13 +179,13 @@ def test_background_mode_keeps_the_window_opaque(window):
     itself must stay fully opaque or glyphs would fade too."""
     window.apply_config(Config(opacity=40, opacity_mode=OPACITY_BACKGROUND))
     assert window.windowOpacity() == 1.0
-    assert window.testAttribute(Qt.WA_TranslucentBackground)
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
 def test_window_mode_fades_the_whole_window(window):
     window.apply_config(Config(opacity=40, opacity_mode=OPACITY_WINDOW))
     assert abs(window.windowOpacity() - 0.4) < 0.01
-    assert not window.testAttribute(Qt.WA_TranslucentBackground)
+    assert not window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
 def test_apply_config_moves_and_resizes(window):

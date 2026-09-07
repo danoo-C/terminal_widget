@@ -123,7 +123,7 @@ class WidgetServer(QObject):
         self._send({"t": "geometry", "x": x, "y": y, "w": width, "h": height})
 
     def _send(self, payload: dict) -> None:
-        if self._client is not None and self._client.state() == QLocalSocket.ConnectedState:
+        if self._client is not None and self._client.state() == QLocalSocket.LocalSocketState.ConnectedState:
             self._client.write(_encode(payload))
             self._client.flush()
 
@@ -160,7 +160,7 @@ class SettingsClient(QObject):
 
     @property
     def is_connected(self) -> bool:
-        return self._socket.state() == QLocalSocket.ConnectedState
+        return self._socket.state() == QLocalSocket.LocalSocketState.ConnectedState
 
     def start(self, name: str | None = None) -> None:
         """Connect, and keep retrying so a widget started later is picked up."""
@@ -172,7 +172,7 @@ class SettingsClient(QObject):
     def _try_connect(self) -> None:
         if not self._wanted or self.is_connected:
             return
-        if self._socket.state() == QLocalSocket.UnconnectedState:
+        if self._socket.state() == QLocalSocket.LocalSocketState.UnconnectedState:
             self._reader = _LineReader()
             self._socket.connectToServer(self._name)
 
@@ -188,7 +188,7 @@ class SettingsClient(QObject):
     def _on_error(self, _error) -> None:
         # Nothing listening yet is the normal case, not a failure; the retry
         # timer will keep trying until a widget shows up.
-        if self._socket.state() != QLocalSocket.UnconnectedState:
+        if self._socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
             self._socket.abort()
 
     def _on_ready_read(self) -> None:
@@ -211,7 +211,7 @@ class SettingsClient(QObject):
     def stop(self) -> None:
         self._wanted = False
         self._retry.stop()
-        if self._socket.state() != QLocalSocket.UnconnectedState:
+        if self._socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
             self._socket.disconnectFromServer()
 
 

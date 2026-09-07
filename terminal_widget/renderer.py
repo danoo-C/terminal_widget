@@ -49,16 +49,16 @@ class TerminalView(QWidget):
         self._color_cache: dict[str, QColor] = {}
         self.session: TerminalSession | None = None
 
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
-        self.setCursor(Qt.IBeamCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
         self._apply_font()
 
     # -- Appearance --------------------------------------------------
 
     def _apply_font(self) -> None:
         font = QFont(self._config.font_family, self._config.font_size)
-        font.setStyleHint(QFont.Monospace)
+        font.setStyleHint(QFont.StyleHint.Monospace)
         font.setFixedPitch(True)
         self.setFont(font)
         fm = QFontMetricsF(font)
@@ -80,7 +80,7 @@ class TerminalView(QWidget):
         self._config_mode = enabled
         # In config mode the whole surface is a drag handle, so an I-beam
         # would be a lie about what a click does.
-        self.setCursor(Qt.ArrowCursor if enabled else Qt.IBeamCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor if enabled else Qt.CursorShape.IBeamCursor)
 
     # -- Grid sizing -------------------------------------------------
 
@@ -130,9 +130,9 @@ class TerminalView(QWidget):
         if self._config.opacity_mode == OPACITY_BACKGROUND:
             default_bg.setAlpha(int(self._config.opacity * 255 / 100))
 
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         painter.fillRect(self.rect(), default_bg)
-        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
         if self.session is None:
             painter.end()
@@ -233,7 +233,7 @@ class TerminalView(QWidget):
         if self._config_mode:
             event.ignore()
             return
-        self.setFocus(Qt.MouseFocusReason)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         event.accept()
 
     def focusInEvent(self, event) -> None:  # noqa: N802

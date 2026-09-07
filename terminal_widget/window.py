@@ -21,14 +21,14 @@ from .session import TerminalSession
 RESIZE_MARGIN = 7
 
 _EDGE_CURSORS = {
-    Qt.LeftEdge: Qt.SizeHorCursor,
-    Qt.RightEdge: Qt.SizeHorCursor,
-    Qt.TopEdge: Qt.SizeVerCursor,
-    Qt.BottomEdge: Qt.SizeVerCursor,
-    Qt.TopEdge | Qt.LeftEdge: Qt.SizeFDiagCursor,
-    Qt.BottomEdge | Qt.RightEdge: Qt.SizeFDiagCursor,
-    Qt.TopEdge | Qt.RightEdge: Qt.SizeBDiagCursor,
-    Qt.BottomEdge | Qt.LeftEdge: Qt.SizeBDiagCursor,
+    Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor,
+    Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
+    Qt.Edge.TopEdge: Qt.CursorShape.SizeVerCursor,
+    Qt.Edge.BottomEdge: Qt.CursorShape.SizeVerCursor,
+    Qt.Edge.TopEdge | Qt.Edge.LeftEdge: Qt.CursorShape.SizeFDiagCursor,
+    Qt.Edge.BottomEdge | Qt.Edge.RightEdge: Qt.CursorShape.SizeFDiagCursor,
+    Qt.Edge.TopEdge | Qt.Edge.RightEdge: Qt.CursorShape.SizeBDiagCursor,
+    Qt.Edge.BottomEdge | Qt.Edge.LeftEdge: Qt.CursorShape.SizeBDiagCursor,
 }
 
 
@@ -42,16 +42,16 @@ class _ConfigOverlay(QWidget):
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        pen = QPen(QColor("#4aa3ff"), 2, Qt.DashLine)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(QColor("#4aa3ff"), 2, Qt.PenStyle.DashLine)
         painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(self.rect()).adjusted(1, 1, -1, -1))
         painter.end()
 
@@ -71,7 +71,7 @@ class WidgetWindow(QWidget):
         self._translucent = False
 
         self.setWindowTitle("terminal_widget")
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.setMouseTracking(True)
 
         self.view = TerminalView(config, self)
@@ -169,8 +169,8 @@ class WidgetWindow(QWidget):
             self.setWindowOpacity(max(0.1, self._config.opacity / 100))
 
         if want_translucent != self._translucent:
-            self.setAttribute(Qt.WA_TranslucentBackground, want_translucent)
-            self.setAttribute(Qt.WA_NoSystemBackground, want_translucent)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want_translucent)
+            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, want_translucent)
             self._translucent = want_translucent
         self.update()
 
@@ -211,17 +211,17 @@ class WidgetWindow(QWidget):
 
     # -- Drag and resize (config mode only) ---------------------------
 
-    def _edges_at(self, pos) -> Qt.Edges:
+    def _edges_at(self, pos) -> Qt.Edge:
         """Which window edges, if any, a point is close enough to grab."""
-        edges = Qt.Edges()
+        edges = Qt.Edge(0)
         if pos.x() <= RESIZE_MARGIN:
-            edges |= Qt.LeftEdge
+            edges |= Qt.Edge.LeftEdge
         elif pos.x() >= self.width() - RESIZE_MARGIN:
-            edges |= Qt.RightEdge
+            edges |= Qt.Edge.RightEdge
         if pos.y() <= RESIZE_MARGIN:
-            edges |= Qt.TopEdge
+            edges |= Qt.Edge.TopEdge
         elif pos.y() >= self.height() - RESIZE_MARGIN:
-            edges |= Qt.BottomEdge
+            edges |= Qt.Edge.BottomEdge
         return edges
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -232,10 +232,10 @@ class WidgetWindow(QWidget):
             self.move(event.globalPosition().toPoint() - self._drag_origin)
             return
         edges = self._edges_at(event.position().toPoint())
-        self.setCursor(_EDGE_CURSORS.get(edges, Qt.SizeAllCursor))
+        self.setCursor(_EDGE_CURSORS.get(edges, Qt.CursorShape.SizeAllCursor))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if not self._config_mode or event.button() != Qt.LeftButton:
+        if not self._config_mode or event.button() != Qt.MouseButton.LeftButton:
             return
         handle = self.windowHandle()
         edges = self._edges_at(event.position().toPoint())

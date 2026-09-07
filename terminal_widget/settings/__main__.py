@@ -93,11 +93,15 @@ class SettingsWindow(QWidget):
             s.valueChanged.connect(self._on_ui_changed)
 
         pos = QHBoxLayout()
-        pos.addWidget(QLabel("X")), pos.addWidget(self.spin_x)
-        pos.addWidget(QLabel("Y")), pos.addWidget(self.spin_y)
+        pos.addWidget(QLabel("X"))
+        pos.addWidget(self.spin_x)
+        pos.addWidget(QLabel("Y"))
+        pos.addWidget(self.spin_y)
         size = QHBoxLayout()
-        size.addWidget(QLabel("W")), size.addWidget(self.spin_w)
-        size.addWidget(QLabel("H")), size.addWidget(self.spin_h)
+        size.addWidget(QLabel("W"))
+        size.addWidget(self.spin_w)
+        size.addWidget(QLabel("H"))
+        size.addWidget(self.spin_h)
 
         form.addRow("Position", pos)
         form.addRow("Size", size)
@@ -138,7 +142,8 @@ class SettingsWindow(QWidget):
         box = QGroupBox("Appearance")
         form = QFormLayout(box)
 
-        self.slider_opacity = QSlider(Qt.Horizontal, minimum=10, maximum=100)
+        self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_opacity.setRange(10, 100)
         self.label_opacity = QLabel()
         self.slider_opacity.valueChanged.connect(self._on_ui_changed)
         row = QHBoxLayout()
@@ -155,7 +160,7 @@ class SettingsWindow(QWidget):
         form.addRow("Applies to", modes)
 
         self.combo_font = QFontComboBox()
-        self.combo_font.setFontFilters(QFontComboBox.MonospacedFonts)
+        self.combo_font.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts)
         self.combo_font.currentFontChanged.connect(self._on_ui_changed)
         form.addRow("Font", self.combo_font)
 
@@ -268,7 +273,7 @@ class SettingsWindow(QWidget):
         # Pixels are what you enter, but a terminal is a character grid, so
         # show what the chosen size actually buys you.
         font = QFont(self.combo_font.currentFont().family(), self.spin_font.value())
-        font.setStyleHint(QFont.Monospace)
+        font.setStyleHint(QFont.StyleHint.Monospace)
         fm = QFontMetricsF(font)
         cw, ch = fm.horizontalAdvance("M"), fm.height()
         if cw > 0 and ch > 0:

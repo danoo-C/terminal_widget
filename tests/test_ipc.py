@@ -66,7 +66,9 @@ def test_config_from_rejects_non_dict():
 
 
 def test_config_from_clamps():
-    assert _config_from({"opacity": 9999}).opacity == 100
+    cfg = _config_from({"opacity": 9999})
+    assert cfg is not None
+    assert cfg.opacity == 100
 
 
 # -- Round trip -------------------------------------------------------
