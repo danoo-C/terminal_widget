@@ -2,6 +2,7 @@ import pytest
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
 
+from terminal_widget import keys
 from terminal_widget.keys import sequence_for
 
 
@@ -67,3 +68,48 @@ def test_unicode_passes_through():
 def test_modifier_only_press_is_ignored():
     """Holding Shift alone must not send anything to the shell."""
     assert sequence_for(ev(Qt.Key.Key_Shift, Qt.KeyboardModifier.ShiftModifier, "")) is None
+
+
+# -- Widget actions ---------------------------------------------------
+
+CTRL = Qt.KeyboardModifier.ControlModifier
+SHIFT = Qt.KeyboardModifier.ShiftModifier
+
+
+@pytest.mark.parametrize(
+    "key,mods,expected",
+    [
+        (Qt.Key.Key_PageUp, SHIFT, keys.SCROLL_PAGE_UP),
+        (Qt.Key.Key_PageDown, SHIFT, keys.SCROLL_PAGE_DOWN),
+        (Qt.Key.Key_Home, SHIFT, keys.SCROLL_TOP),
+        (Qt.Key.Key_End, SHIFT, keys.SCROLL_BOTTOM),
+        (Qt.Key.Key_C, CTRL | SHIFT, keys.COPY),
+        (Qt.Key.Key_V, CTRL, keys.PASTE),
+        (Qt.Key.Key_V, CTRL | SHIFT, keys.PASTE),
+        (Qt.Key.Key_Insert, SHIFT, keys.PASTE),
+    ],
+)
+def test_widget_chords_are_recognised(key, mods, expected):
+    assert keys.action_for(ev(key, mods)) == expected
+
+
+@pytest.mark.parametrize(
+    "key,mods",
+    [
+        (Qt.Key.Key_PageUp, Qt.KeyboardModifier.NoModifier),
+        (Qt.Key.Key_Home, Qt.KeyboardModifier.NoModifier),
+        (Qt.Key.Key_C, CTRL),
+        (Qt.Key.Key_A, CTRL),
+        (Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier),
+    ],
+)
+def test_everything_else_belongs_to_the_shell(key, mods):
+    assert keys.action_for(ev(key, mods)) is None
+
+
+def test_ctrl_shift_c_is_not_an_interrupt():
+    """Shift does not change event.key() for letters, so Ctrl+Shift+C looks
+    exactly like Ctrl+C to sequence_for -- which is why action_for has to be
+    consulted first."""
+    assert sequence_for(ev(Qt.Key.Key_C, CTRL | SHIFT, "\x03")) == "\x03"
+    assert keys.action_for(ev(Qt.Key.Key_C, CTRL | SHIFT)) == keys.COPY

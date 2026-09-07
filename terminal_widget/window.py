@@ -13,7 +13,14 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from .config import OPACITY_BACKGROUND, Config, environment_for, resolve_shell
+from .config import (
+    MIN_OPACITY_WINDOW,
+    OPACITY_BACKGROUND,
+    Config,
+    environment_for,
+    resolve_shell,
+    working_dir_for,
+)
 from .platform_info import DISPLAY_NAME, icon_path
 from .renderer import TerminalView
 from .session import TerminalSession
@@ -97,12 +104,14 @@ class WidgetWindow(QWidget):
     def start_session(self) -> None:
         """Spawn the configured shell and wire it to the view."""
         cols, rows = self.view.grid_size()
-        self.session = TerminalSession(cols, rows, self)
+        self.session = TerminalSession(cols, rows, self._config.scrollback, self)
         self.session.screenUpdated.connect(self.view.update)
         self.session.ended.connect(self._on_session_ended)
         self.view.session = self.session
         self.session.start(
-            resolve_shell(self._config), environment_for(self._config)
+            resolve_shell(self._config),
+            environment_for(self._config),
+            working_dir_for(self._config),
         )
         self.view.setFocus()
 
@@ -157,6 +166,8 @@ class WidgetWindow(QWidget):
         self.view.apply_config(config)
         if config.opacity_mode != previous.opacity_mode or config.opacity != previous.opacity:
             self._apply_window_opacity()
+        if config.scrollback != previous.scrollback and self.session is not None:
+            self.session.set_scrollback(config.scrollback)
 
         geom = self.geometry()
         if target != (geom.x(), geom.y(), geom.width(), geom.height()):
@@ -170,7 +181,11 @@ class WidgetWindow(QWidget):
             # stays fully opaque so glyphs render solid.
             self.setWindowOpacity(1.0)
         else:
-            self.setWindowOpacity(max(0.1, self._config.opacity / 100))
+            # Config.clamped() already keeps window mode above the floor;
+            # this is the same number, so the two can never drift apart.
+            self.setWindowOpacity(
+                max(MIN_OPACITY_WINDOW / 100, self._config.opacity / 100)
+            )
 
         if want_translucent != self._translucent:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want_translucent)

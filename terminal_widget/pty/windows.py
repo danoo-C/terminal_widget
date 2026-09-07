@@ -16,7 +16,12 @@ class WindowsPty(PtyBackend):
         self._proc = None
 
     def spawn(
-        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+        self,
+        argv: list[str],
+        cols: int,
+        rows: int,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> None:
         # Imported late, and unresolvable off Windows: pywinpty only installs
         # there, so a type checker running on Linux cannot see it.
@@ -27,7 +32,9 @@ class WindowsPty(PtyBackend):
         # quoting should come through config as a "custom" command already
         # shaped the way Windows expects.
         command = argv[0] if len(argv) == 1 else " ".join(argv)
-        self._proc = PtyProcess.spawn(command, dimensions=(rows, cols), env=env)
+        self._proc = PtyProcess.spawn(
+            command, cwd=cwd, dimensions=(rows, cols), env=env
+        )
 
     def read(self, size: int = 4096) -> str:
         if self._proc is None:

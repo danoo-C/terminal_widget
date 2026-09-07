@@ -15,9 +15,17 @@ class PtyBackend(ABC):
 
     @abstractmethod
     def spawn(
-        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+        self,
+        argv: list[str],
+        cols: int,
+        rows: int,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> None:
-        """Start ``argv`` on a PTY sized ``cols`` x ``rows``."""
+        """Start ``argv`` on a PTY sized ``cols`` x ``rows``.
+
+        ``cwd`` is the directory to start in; None lets the shell choose.
+        """
 
     @abstractmethod
     def read(self, size: int = 4096) -> str:

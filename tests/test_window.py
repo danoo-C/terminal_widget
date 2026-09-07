@@ -2,6 +2,7 @@
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
 
 from terminal_widget.config import OPACITY_BACKGROUND, OPACITY_WINDOW, Config
 
@@ -201,3 +202,110 @@ def test_config_property_tracks_applied_settings(window):
     window.apply_config(replacement)
     assert window.config is replacement
     assert (window.config.x, window.config.y) == (11, 22)
+
+
+def test_zero_opacity_keeps_the_window_itself_opaque(window):
+    """At 0% in background mode the backdrop goes but the glyphs stay, which
+    only works if the window opacity is left alone."""
+    window.apply_config(Config(opacity=0, opacity_mode=OPACITY_BACKGROUND))
+    assert window.windowOpacity() == 1.0
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+
+def test_the_backdrop_never_becomes_a_true_zero(window):
+    """A fully transparent pixel of a layered window is click-through on
+    Windows, which would leave the widget unclickable off the glyphs."""
+    window.apply_config(Config(opacity=0, opacity_mode=OPACITY_BACKGROUND))
+    assert window.view.backdrop_alpha() == 1
+
+
+def test_the_backdrop_alpha_follows_the_opacity(window):
+    window.apply_config(Config(opacity=50, opacity_mode=OPACITY_BACKGROUND))
+    assert window.view.backdrop_alpha() == 128
+
+
+def test_window_mode_paints_a_solid_backdrop(window):
+    """The window is what fades there; fading the backdrop as well would
+    apply the setting twice."""
+    window.apply_config(Config(opacity=40, opacity_mode=OPACITY_WINDOW))
+    assert window.view.backdrop_alpha() == 255
+
+
+def test_window_mode_never_fades_to_nothing(window):
+    """clamped() holds window mode at the floor, and the window applies the
+    same number, so the two cannot drift apart."""
+    window.apply_config(Config(opacity=0, opacity_mode=OPACITY_WINDOW).clamped())
+    assert abs(window.windowOpacity() - 0.1) < 0.01
+
+
+# -- Scrollback and the working directory ------------------------------
+
+
+def test_scrollback_changes_without_a_restart(live):
+    live.apply_config(Config(scrollback=17))
+    assert live.session.screen.history.maxlen == 17
+
+
+def test_the_session_is_given_the_configured_working_directory(monkeypatch):
+    """The value has to reach the backend, since nothing downstream of the
+    spawn can tell you it did not."""
+    from terminal_widget import session as session_module
+
+    seen = {}
+
+    class FakeBackend:
+        def spawn(self, argv, cols, rows, env=None, cwd=None):
+            seen["argv"], seen["cwd"] = argv, cwd
+
+        def read(self, size=4096):
+            raise EOFError
+
+        def write(self, data):
+            pass
+
+        def resize(self, cols, rows):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(session_module, "open_pty", lambda: FakeBackend())
+    session = session_module.TerminalSession(20, 5)
+    session.start(["sh"], None, "/tmp")
+    session.stop()
+    assert seen == {"argv": ["sh"], "cwd": "/tmp"}
+
+
+def test_config_mode_drag_still_moves_the_window(window):
+    """The view gained move and release handlers for selection. If they do
+    not decline in config mode, this drag stops reaching the window and
+    dragging breaks wherever startSystemMove is unavailable.
+
+    Sent through QApplication rather than called directly, because it is
+    Qt's propagation of the declined events that is under test.
+    """
+    window.set_config_mode(True)
+
+    def send(kind, x, y, button, buttons):
+        QApplication.sendEvent(
+            window.view,
+            QMouseEvent(
+                kind,
+                QPointF(x, y),
+                QPointF(window.view.mapToGlobal(QPoint(x, y))),
+                button,
+                buttons,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+    send(QEvent.Type.MouseButtonPress, 300, 150,
+         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+    assert window._drag_origin is not None
+    before = (window.x(), window.y())
+    send(QEvent.Type.MouseMove, 340, 190,
+         Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+    assert (window.x(), window.y()) == (before[0] + 40, before[1] + 40)

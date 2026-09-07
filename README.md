@@ -74,7 +74,8 @@ The widget becomes a pure terminal:
 - **It does not move.** Dragging does nothing. Position is frozen.
 - **It does not resize.** No handles, no resize cursors. Size is frozen.
 - **It is still a real terminal.** Click it to take keyboard focus, type commands,
-  read output, select text with the mouse. Everything you expect of a terminal.
+  read output, scroll back with the wheel, select text with the mouse and copy it.
+  Everything you expect of a terminal.
 
 Put differently: locked mode ignores *window-management* gestures and nothing
 else. It is a terminal without a title bar, not a picture of a terminal.
@@ -88,6 +89,7 @@ else. It is a terminal without a title bar, not a picture of a terminal.
 | Resize handles | **yes** | no |
 | Keyboard input to shell | yes | yes |
 | Mouse text selection | no (drag moves window) | yes |
+| Mouse wheel scrollback | no (window owns the mouse) | yes |
 | Shell session | continues | continues |
 
 ---
@@ -120,34 +122,59 @@ adjust them.
 | --- | --- | --- |
 | Terminal program | dropdown | The shell the widget spawns. |
 | Custom command | text | Free-form command line, when the dropdown is set to *Custom*. |
+| Start in | path | Directory the shell opens in. Empty means the shell's own default. |
 
 The dropdown offers what actually exists on the current platform:
 
 - **Windows:** Command Prompt (`cmd.exe`), PowerShell, WSL, Custom
 - **Linux:** Bash, Zsh, Fish, the login shell from `$SHELL`, Custom
 
-Changing the shell **does** restart the session — it is the one setting that
-cannot be applied live, since it means killing one process and starting another.
-The settings app will say so before it happens.
+The shell and the directory it starts in are both read when the widget launches,
+so changing either takes effect the next time it starts rather than restarting the
+running session under you. **Start in** accepts `~` and environment variables; a
+directory that no longer exists is ignored rather than taken as an instruction,
+because the shell chdirs after forking and a bad path there would kill the widget
+at launch with nothing on screen to explain why.
 
 ### Appearance
 
 | Setting | Type | Notes |
 | --- | --- | --- |
-| Opacity | 0–100% | How transparent the widget is. |
+| Opacity | 0–100% | How transparent the widget is. The floor depends on the mode. |
 | Opacity applies to | choice | *Background only* or *Entire window* — see below. |
 
 Two opacity behaviours, selectable:
 
 - **Background only** *(recommended default)* — the desktop shows through behind
   the terminal, but characters render fully opaque. Text stays sharp and readable
-  even at low opacity. This is what most desktop terminal widgets do.
+  even at low opacity. This is what most desktop terminal widgets do. It goes all
+  the way down to **0%**, which is the point of it: no window at all, just text
+  lying on the desktop.
 - **Entire window** — text and background fade together, like a normal window's
-  opacity. Simpler, more uniform, but text washes out quickly.
+  opacity. Simpler, more uniform, but text washes out quickly. This one stops at
+  **10%**: below that the glyphs go too, and a window you cannot see is a window
+  you cannot find again to turn back up. Switching to this mode raises a lower
+  value to 10 rather than making the widget vanish.
+
+Even at 0% the backdrop is painted one part in 255 rather than truly clear, so
+every pixel of the widget still takes a click. A completely transparent pixel of
+a layered window is click-through on Windows, which would leave the widget
+unclickable everywhere except exactly on a letter.
 
 Font family, font size, and color scheme also live here.
 
 ### Behaviour
+
+| Setting | Type | Notes |
+| --- | --- | --- |
+| Scrollback | 0–50000 lines | How far the wheel can scroll back. 5000 by default; 0 turns it off. |
+
+There is no scrollbar and no chrome to put one in, so the wheel is the whole
+interface. Shift+PageUp/PageDown move by a page and Shift+Home/End jump to either
+end; typing anything returns to the bottom. Output arriving while you are scrolled
+up does not drag the view down with it. Full-screen programs — `vim`, `less`,
+`htop` — do not feed the scrollback, so what is in it is the session you actually
+had rather than a flipbook of redraws.
 
 | Setting | Type | Notes |
 | --- | --- | --- |
@@ -169,6 +196,28 @@ Linux, a per-user `Run` registry value on Windows. Neither needs administrator
 rights. It is disabled, with the reason shown, when the widget is running from
 a source checkout (no stable path to register) or under WSL (no persistent
 desktop session for it to run in).
+
+### Selecting and copying
+
+Drag to select. Double-click takes a word — paths and URLs count as one — and
+triple-click takes a line with its newline. Dragging past the top or bottom edge
+scrolls while you hold it. A selection is anchored to the text, not the screen, so
+it survives scrolling and output arriving underneath it.
+
+| Key | Does |
+| --- | --- |
+| `Ctrl+C` | Copies **when something is selected**; otherwise sends the usual interrupt. |
+| `Ctrl+Shift+C` | Always copies, for when `Ctrl+C` needs to reach the shell. |
+| `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Paste. |
+| Right click | Paste. Middle click pastes the X11 primary selection. |
+
+`Ctrl+C` is deliberately conditional: a copy shortcut that also killed whatever
+was running would be worse than no copy shortcut. Binding `Ctrl+V` to paste does
+cost the shell `\x16` (readline's quoted-insert, `vim`'s visual block) — the
+trade most terminals on Windows make, and `Ctrl+Shift+V` is there regardless.
+
+Pastes are bracketed when the shell asks for it (DEC mode 2004), so pasting a
+block of lines hands them over as text instead of running each one as it arrives.
 
 ### Configuration
 
@@ -319,7 +368,7 @@ python3 -m venv .venv
 source .venv/bin/activate        # .venv\Scripts\Activate.ps1 on Windows
 pip install -e ".[dev]"
 
-python -m pytest tests/          # 98 tests, no display needed
+python -m pytest tests/          # offscreen, no display needed
 python -m pyright                # type checking
 python -m terminal_widget        # run from source
 python -m terminal_widget.settings
@@ -337,7 +386,8 @@ terminal_widget/
 ├── terminal_widget/
 │   ├── __main__.py        # widget entry point
 │   ├── window.py          # frameless window; the two modes
-│   ├── renderer.py        # draws the pyte screen buffer
+│   ├── renderer.py        # draws the screen; viewport and selection
+│   ├── screen.py          # pyte screen + scrollback; absolute row space
 │   ├── session.py         # shell lifecycle + reader thread
 │   ├── keys.py            # Qt key events -> escape sequences
 │   ├── config.py          # load / save / defaults / shells
@@ -348,7 +398,7 @@ terminal_widget/
 │   ├── assets/            # application icon
 │   └── settings/          # the settings app
 ├── tools/make_icon.py     # regenerates the icon
-├── tests/                 # 98 tests, offscreen
+├── tests/                 # offscreen, no display needed
 ├── LICENSE
 └── README.md
 ```
@@ -377,8 +427,10 @@ Things that will need deciding or discovering as the code gets written:
   two made the widget drift by the frame offset on every launch.
 - **Font rendering performance.** Repainting a full character grid per frame can
   be slow if done naively; will likely need dirty-region tracking.
-- **Scrollback.** Whether the widget keeps any at all, given the no-chrome goal —
-  there is no scrollbar and no obvious place to put one.
+- **Scrollback reflow.** pyte does not rewrap on a width change, and retired
+  lines keep the width they had, so widening the widget and scrolling up shows the
+  old wrapping. Growing the window also does not pull lines back out of the
+  scrollback the way xterm does; both would mean reimplementing `resize`.
 - **Shell exit.** The widget currently closes when the shell exits. Respawning
   or showing a message may suit a permanent desktop widget better.
 - **Windows.** Nothing has ever been run on Windows -- not the ConPTY backend,

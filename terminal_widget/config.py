@@ -19,6 +19,18 @@ APP_NAME = "terminal_widget"
 OPACITY_BACKGROUND = "background"  # only the backdrop fades; glyphs stay solid
 OPACITY_WINDOW = "window"  # the whole window fades, glyphs included
 
+#: The lowest opacity each mode can survive. Background-only fades nothing but
+#: the backdrop, so 0 is the whole point of it -- glyphs floating on the
+#: desktop. Whole-window fades the glyphs too, and a fully faded window is one
+#: you cannot see, find, or fix, so it stops short of disappearing.
+MIN_OPACITY_BACKGROUND = 0
+MIN_OPACITY_WINDOW = 10
+
+
+def min_opacity(mode: str) -> int:
+    """The lowest opacity that still leaves something on screen in ``mode``."""
+    return MIN_OPACITY_WINDOW if mode == OPACITY_WINDOW else MIN_OPACITY_BACKGROUND
+
 
 def config_dir() -> Path:
     """Platform-conventional configuration directory."""
@@ -60,6 +72,9 @@ class Config:
     # -- Shell. `shell` is a preset key; "custom" defers to `custom_command`.
     shell: str = "default"
     custom_command: str = ""
+    #: Directory to start the shell in. Empty means "let the shell decide",
+    #: which is what every terminal does by default.
+    working_dir: str = ""
     #: Keep the widget's shell history out of the login shell's history file.
     #: A desktop widget you type the odd command into should not rewrite the
     #: history of the terminal you actually work in.
@@ -73,6 +88,9 @@ class Config:
     foreground: str = "#e0e0e0"
     background: str = "#101014"
 
+    # -- Scrollback, in lines. 0 turns it off.
+    scrollback: int = 5000
+
     def clamped(self) -> "Config":
         """Return a copy with out-of-range values pulled back into range."""
         c = Config(**asdict(self))
@@ -80,10 +98,17 @@ class Config:
         c.height = max(80, int(c.height))
         c.x = int(c.x)
         c.y = int(c.y)
-        c.opacity = min(100, max(10, int(c.opacity)))
-        c.font_size = min(72, max(5, int(c.font_size)))
+        # Order matters: the opacity floor depends on the mode, so an
+        # unrecognised mode has to fall back *before* the floor is applied.
         if c.opacity_mode not in (OPACITY_BACKGROUND, OPACITY_WINDOW):
             c.opacity_mode = OPACITY_BACKGROUND
+        c.opacity = min(100, max(min_opacity(c.opacity_mode), int(c.opacity)))
+        c.font_size = min(72, max(5, int(c.font_size)))
+        c.scrollback = min(50000, max(0, int(c.scrollback)))
+        # Deliberately not checked against the filesystem: clamped() runs on
+        # every IPC message, which is every keystroke in the settings app.
+        # Whether the directory exists is decided once, at spawn time.
+        c.working_dir = str(c.working_dir or "")
         return c
 
     # -- Persistence -------------------------------------------------
@@ -169,6 +194,27 @@ def environment_for(cfg: Config) -> dict[str, str]:
         env["HISTFILE"] = str(path)
         env["fish_history"] = APP_NAME
     return env
+
+
+def working_dir_for(cfg: Config) -> str | None:
+    """The directory to start the shell in, or None to let it choose.
+
+    A configured directory that has since been renamed or deleted must not
+    stop the widget from starting. Both PTY backends chdir in the child, so
+    a bad path there kills the shell before it prints anything, the reader
+    hits EOF, and the window closes on launch with nothing to explain it.
+    Checking here, in the parent, turns that into a silent fallback.
+    """
+    raw = (cfg.working_dir or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(os.path.expandvars(raw)).expanduser()
+        if path.is_dir():
+            return str(path)
+    except OSError:
+        pass
+    return None
 
 
 def resolve_shell(cfg: Config) -> list[str]:
