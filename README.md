@@ -9,9 +9,11 @@ free of UI clutter.
 
 Runs on **Linux** and **Windows**.
 
-> **Status: early / scaffolding.** The repository is currently project setup and
-> this specification. None of the application code described below has been
-> written yet.
+> **Status: the widget works; the settings app does not exist yet.**
+> The widget spawns a shell, renders it, and takes input. Both modes are
+> implemented and tested. What is missing is the settings app itself and the
+> IPC link that would let it drive config mode -- until then, `--config-mode`
+> turns config mode on by hand.
 
 ---
 
@@ -233,33 +235,57 @@ pip install --upgrade pip
 
 The `.venv/` directory is git-ignored — each machine creates its own.
 
-### Running
+### System dependencies (Linux only)
 
-Not yet runnable. Once the application code lands, it will be:
+Qt needs a handful of X11 libraries that are not always installed:
 
 ```bash
-python -m terminal_widget            # the widget
-python -m terminal_widget.settings   # the settings app, which also
-                                     # puts a running widget into config mode
+sudo apt install libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+    libxcb-keysyms1 libxcb-render-util0 libxcb-util1 libxcb-xkb1 \
+    libxkbcommon-x11-0
 ```
+
+Without these, Qt fails with `libEGL.so.1: cannot open shared object file` or
+`Could not load the Qt platform plugin "xcb"`. Windows needs no equivalent step.
+
+### Running
+
+```bash
+python -m terminal_widget                 # the widget, in locked mode
+python -m terminal_widget --config-mode    # drag and resize enabled
+```
+
+`--config-mode` is temporary scaffolding. Once the settings app exists, opening
+it is what enables config mode, exactly as specified above.
+
+### Tests
+
+```bash
+pip install pytest
+python -m pytest tests/
+```
+
+The suite runs on Qt's offscreen platform, so it needs no display.
 
 ## Planned layout
 
 ```
 terminal_widget/
 ├── terminal_widget/
-│   ├── __main__.py        # widget entry point
-│   ├── window.py          # frameless window; config/locked mode behaviour
-│   ├── renderer.py        # draws the pyte screen buffer
-│   ├── session.py         # shell process lifecycle
-│   ├── ipc.py             # local socket link to the settings app
+│   ├── __main__.py        # widget entry point                    [done]
+│   ├── window.py          # frameless window; the two modes       [done]
+│   ├── renderer.py        # draws the pyte screen buffer          [done]
+│   ├── session.py         # shell lifecycle + reader thread       [done]
+│   ├── keys.py            # Qt key events -> escape sequences     [done]
+│   ├── config.py          # load / save / defaults / shells       [done]
 │   ├── pty/
-│   │   ├── posix.py       # ptyprocess backend
-│   │   └── windows.py     # pywinpty backend
-│   ├── config.py          # load / save / defaults
+│   │   ├── base.py        # the backend interface                 [done]
+│   │   ├── posix.py       # ptyprocess backend                    [done]
+│   │   └── windows.py     # pywinpty backend            [done, untested]
+│   ├── ipc.py             # local socket to the settings app       [todo]
 │   └── settings/
-│       └── __main__.py    # settings app entry point
-├── tests/
+│       └── __main__.py    # settings app entry point               [todo]
+├── tests/                 # 50 tests, offscreen                   [done]
 ├── LICENSE
 └── README.md
 ```
@@ -283,8 +309,9 @@ Things that will need deciding or discovering as the code gets written:
   be slow if done naively; will likely need dirty-region tracking.
 - **Scrollback.** Whether the widget keeps any at all, given the no-chrome goal —
   there is no scrollbar and no obvious place to put one.
-- **Shell exit.** What the widget does when the shell exits: respawn silently,
-  show a message, or close.
+- **Shell exit.** The widget currently closes when the shell exits. Respawning
+  or showing a message may suit a permanent desktop widget better.
+- **Windows.** The ConPTY backend is written but has never been run on Windows.
 
 ## License
 
