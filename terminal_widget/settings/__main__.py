@@ -9,15 +9,25 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetricsF, QIcon
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontMetricsF,
+    QGuiApplication,
+    QIcon,
+    QPalette,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QFileDialog,
     QFontComboBox,
     QFormLayout,
     QFrame,
@@ -42,9 +52,12 @@ from ..config import (
     available_shells,
     config_dir,
     config_path,
+    min_opacity,
+    working_dir_for,
 )
 from ..ipc import SettingsClient
 from ..platform_info import DISPLAY_NAME, icon_path, widget_launcher
+from .theme import muted_color, status_colors
 
 
 class SettingsWindow(QWidget):
@@ -53,12 +66,18 @@ class SettingsWindow(QWidget):
         self._config = config
         self._path = path
         self._updating = False  # guards against feedback loops
+        self._restyling = False
+        #: Labels whose colour is computed rather than inherited, and the
+        #: status line's meaning rather than its colour -- both so a theme
+        #: change can be replayed onto them.
+        self._muted: list[QLabel] = []
+        self._status: tuple[str, str] = ("info", "")
 
         self.setWindowTitle(f"{DISPLAY_NAME} Settings")
         icon = icon_path()
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
 
         self.client = SettingsClient(self)
         self.client.connected.connect(self._on_connected)
@@ -86,15 +105,85 @@ class SettingsWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The viewport defaults to the Base role, which puts the settings on
+        # a white (or near-black) panel inset in the dialog. Window keeps it
+        # one surface -- and makes it the colour the hint text is computed
+        # against.
+        scroll.viewport().setBackgroundRole(QPalette.ColorRole.Window)
         root.addWidget(scroll, 1)
 
         root.addLayout(self._build_buttons())
-        self.resize(460, 700)
+        self.resize(560, 700)
+
+        # Qt follows the system light/dark scheme, but has no palette role
+        # for secondary text, so the hint labels have to be coloured by hand
+        # -- and recoloured whenever the scheme changes underneath us.
+        QGuiApplication.styleHints().colorSchemeChanged.connect(
+            lambda *_: self._restyle()
+        )
+        self._restyle()
 
         self._load_into_ui()
         self._refresh_autostart()
         self.client.start()
         self._on_disconnected()
+
+    # -- Theming -----------------------------------------------------
+
+    def _hint(self, text: str = "") -> QLabel:
+        """A secondary label, registered so themes can be replayed onto it."""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        self._muted.append(label)
+        return label
+
+    def _restyle(self) -> None:
+        """Recolour everything whose colour is computed, not inherited.
+
+        Setting a palette on a child marks it WA_SetPalette, so it stops
+        following later application palette changes. That is precisely why
+        the labels are kept in a list and re-coloured here rather than
+        styled once at construction.
+        """
+        if self._restyling:
+            return
+        self._restyling = True
+        try:
+            color = muted_color(self.palette())
+            for label in self._muted:
+                self._recolor(label, color)
+            self._paint_status()
+        finally:
+            self._restyling = False
+
+    @staticmethod
+    def _recolor(label: QLabel, color: QColor) -> None:
+        palette = label.palette()
+        palette.setColor(QPalette.ColorRole.WindowText, color)
+        label.setPalette(palette)
+
+    def _set_status(self, kind: str, text: str) -> None:
+        """Say something in the status line. ``kind`` is ok, error or info."""
+        self._status = (kind, text)
+        self._paint_status()
+
+    def _paint_status(self) -> None:
+        kind, text = self._status
+        self.status.setText(text)
+        ok, error = status_colors(self.palette())
+        self._recolor(
+            self.status,
+            {"ok": ok, "error": error}.get(kind, muted_color(self.palette())),
+        )
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.ThemeChange,
+        ):
+            self._restyle()
 
     # -- Sections ----------------------------------------------------
 
@@ -132,13 +221,11 @@ class SettingsWindow(QWidget):
 
         form.addRow("Position", pos)
         form.addRow("Size", size)
-        self.grid_label = QLabel()
-        self.grid_label.setStyleSheet("color: palette(mid);")
+        self.grid_label = self._hint()
         form.addRow("", self.grid_label)
-        hint = QLabel("Drag the widget to move it; drag its edges to resize.")
-        hint.setStyleSheet("color: palette(mid);")
-        hint.setWordWrap(True)
-        form.addRow("", hint)
+        form.addRow(
+            "", self._hint("Drag the widget to move it; drag its edges to resize.")
+        )
         return box
 
     def _build_shell(self) -> QGroupBox:
@@ -156,21 +243,36 @@ class SettingsWindow(QWidget):
         self.edit_custom.textChanged.connect(self._on_ui_changed)
         form.addRow("Custom command", self.edit_custom)
 
-        self.shell_note = QLabel(
-            "Changing the shell restarts the session -- the running shell is "
-            "replaced, so anything in it is lost."
+        self.edit_workdir = QLineEdit()
+        self.edit_workdir.setPlaceholderText("The shell's own default")
+        self.edit_workdir.textChanged.connect(self._on_ui_changed)
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(self._browse_workdir)
+        where = QHBoxLayout()
+        where.addWidget(self.edit_workdir, 1)
+        where.addWidget(browse)
+        form.addRow("Start in", where)
+
+        self.shell_note = self._hint(
+            "The shell and the directory it starts in are read when the "
+            "widget launches, so changing either takes effect next time it "
+            "starts. A directory that no longer exists is ignored."
         )
-        self.shell_note.setWordWrap(True)
-        self.shell_note.setStyleSheet("color: palette(mid);")
         form.addRow("", self.shell_note)
         return box
+
+    def _browse_workdir(self) -> None:
+        start = working_dir_for(self._config) or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Start the shell in", start)
+        if chosen:
+            self.edit_workdir.setText(chosen)  # fires _on_ui_changed
 
     def _build_appearance(self) -> QGroupBox:
         box = QGroupBox("Appearance")
         form = QFormLayout(box)
 
         self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
-        self.slider_opacity.setRange(10, 100)
+        self.slider_opacity.setRange(0, 100)
         self.label_opacity = QLabel()
         self.slider_opacity.valueChanged.connect(self._on_ui_changed)
         row = QHBoxLayout()
@@ -180,11 +282,19 @@ class SettingsWindow(QWidget):
 
         self.radio_bg = QRadioButton("Background only (text stays solid)")
         self.radio_win = QRadioButton("Entire window (text fades too)")
-        self.radio_bg.toggled.connect(self._on_ui_changed)
+        self.radio_bg.toggled.connect(self._on_opacity_mode_changed)
         modes = QVBoxLayout()
         modes.addWidget(self.radio_bg)
         modes.addWidget(self.radio_win)
         form.addRow("Applies to", modes)
+        form.addRow(
+            "",
+            self._hint(
+                "Background only reaches 0%: the window disappears and the "
+                "text stays. Entire window stops at 10%, below which there "
+                "would be nothing left to see or click."
+            ),
+        )
 
         self.combo_font = QFontComboBox()
         self.combo_font.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts)
@@ -210,6 +320,19 @@ class SettingsWindow(QWidget):
         box = QGroupBox("Behaviour")
         form = QFormLayout(box)
 
+        self.spin_scrollback = QSpinBox(minimum=0, maximum=50000, singleStep=500)
+        self.spin_scrollback.setSuffix(" lines")
+        self.spin_scrollback.setSpecialValueText("Off")
+        self.spin_scrollback.valueChanged.connect(self._on_ui_changed)
+        form.addRow("Scrollback", self.spin_scrollback)
+        form.addRow(
+            "",
+            self._hint(
+                "How far back the mouse wheel can scroll. There is no "
+                "scrollbar -- the wheel is the whole interface."
+            ),
+        )
+
         self.check_history = QCheckBox("Keep shell history separate")
         self.check_history.setToolTip(
             "Commands typed in the widget go to its own history file instead "
@@ -224,9 +347,7 @@ class SettingsWindow(QWidget):
         self.check_autostart.toggled.connect(self._on_autostart_toggled)
         form.addRow("Startup", self.check_autostart)
 
-        self.autostart_note = QLabel()
-        self.autostart_note.setWordWrap(True)
-        self.autostart_note.setStyleSheet("color: palette(mid);")
+        self.autostart_note = self._hint()
         form.addRow("", self.autostart_note)
         return box
 
@@ -234,10 +355,8 @@ class SettingsWindow(QWidget):
         box = QGroupBox("Configuration")
         form = QFormLayout(box)
 
-        path_label = QLabel(str(self._path or config_path()))
-        path_label.setWordWrap(True)
+        path_label = self._hint(str(self._path or config_path()))
         path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        path_label.setStyleSheet("color: palette(mid);")
         form.addRow("File", path_label)
 
         button = QPushButton("Open config folder")
@@ -282,8 +401,7 @@ class SettingsWindow(QWidget):
                 autostart.disable()
         except OSError as exc:
             # Never leave the checkbox claiming a state that is not real.
-            self.status.setText(f"Could not change autostart: {exc}")
-            self.status.setStyleSheet("color: #c62828;")
+            self._set_status("error", f"Could not change autostart: {exc}")
         self._refresh_autostart()
 
     def _open_config_folder(self) -> None:
@@ -291,8 +409,7 @@ class SettingsWindow(QWidget):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            self.status.setText(f"Could not create {directory}: {exc}")
-            self.status.setStyleSheet("color: #c62828;")
+            self._set_status("error", f"Could not create {directory}: {exc}")
             return
         url = QUrl.fromLocalFile(str(directory))
         if QDesktopServices.openUrl(url):
@@ -309,8 +426,7 @@ class SettingsWindow(QWidget):
             else:
                 subprocess.Popen(["xdg-open", str(directory)])
         except (OSError, AttributeError) as exc:
-            self.status.setText(f"Could not open {directory}: {exc}")
-            self.status.setStyleSheet("color: #c62828;")
+            self._set_status("error", f"Could not open {directory}: {exc}")
 
     def _build_buttons(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -340,31 +456,45 @@ class SettingsWindow(QWidget):
         index = self.combo_shell.findData(c.shell)
         self.combo_shell.setCurrentIndex(index if index >= 0 else 0)
         self.edit_custom.setText(c.custom_command)
+        self.edit_workdir.setText(c.working_dir)
 
-        self.slider_opacity.setValue(c.opacity)
         self.radio_bg.setChecked(c.opacity_mode == OPACITY_BACKGROUND)
         self.radio_win.setChecked(c.opacity_mode == OPACITY_WINDOW)
+        # The floor depends on the mode, so it has to be in place before the
+        # value lands -- otherwise a saved 0% gets clamped up to 10 on load.
+        self.slider_opacity.setMinimum(min_opacity(c.opacity_mode))
+        self.slider_opacity.setValue(c.opacity)
         self.combo_font.setCurrentFont(QFont(c.font_family))
         self.spin_font.setValue(c.font_size)
         self.check_history.setChecked(c.separate_history)
+        self.spin_scrollback.setValue(c.scrollback)
         self._updating = False
         self._refresh_derived()
 
     def _config_from_ui(self) -> Config:
-        return Config(
+        """Read the form back into a Config.
+
+        ``replace`` rather than a fresh Config, because this runs on every
+        keystroke and the result becomes the config that gets saved: anything
+        the form does not edit -- the colours today, whatever field is added
+        next -- has to survive, and a constructor call would quietly reset it
+        to the default instead.
+        """
+        return replace(
+            self._config,
             x=self.spin_x.value(),
             y=self.spin_y.value(),
             width=self.spin_w.value(),
             height=self.spin_h.value(),
             shell=self.combo_shell.currentData() or "default",
             custom_command=self.edit_custom.text(),
+            working_dir=self.edit_workdir.text(),
             separate_history=self.check_history.isChecked(),
             opacity=self.slider_opacity.value(),
             opacity_mode=OPACITY_BACKGROUND if self.radio_bg.isChecked() else OPACITY_WINDOW,
             font_family=self.combo_font.currentFont().family(),
             font_size=self.spin_font.value(),
-            foreground=self._config.foreground,
-            background=self._config.background,
+            scrollback=self.spin_scrollback.value(),
         )
 
     def _on_ui_changed(self, *_args) -> None:
@@ -373,6 +503,16 @@ class SettingsWindow(QWidget):
         self._config = self._config_from_ui()
         self._refresh_derived()
         self.client.send_config(self._config)  # live preview
+
+    def _on_opacity_mode_changed(self, *_args) -> None:
+        """Window mode cannot go as low as background mode; raise the floor.
+
+        setMinimum before reading the form back, or the config is built from
+        a value the slider is about to reject.
+        """
+        mode = OPACITY_BACKGROUND if self.radio_bg.isChecked() else OPACITY_WINDOW
+        self.slider_opacity.setMinimum(min_opacity(mode))
+        self._on_ui_changed()
 
     def _on_shell_changed(self, *_args) -> None:
         self.edit_custom.setEnabled(self.combo_shell.currentData() == "custom")
@@ -413,20 +553,20 @@ class SettingsWindow(QWidget):
     # -- Widget connection --------------------------------------------
 
     def _on_connected(self) -> None:
-        self.status.setText(
+        self._set_status(
+            "ok",
             "Connected -- the widget is in config mode. Drag it to move, drag "
-            "its edges to resize."
+            "its edges to resize.",
         )
-        self.status.setStyleSheet("color: #2e7d32;")
         self.btn_launch.setVisible(False)
         self.client.send_config(self._config)
 
     def _on_disconnected(self) -> None:
-        self.status.setText(
+        self._set_status(
+            "info",
             "No widget running. Changes are saved to the config file and will "
-            "apply next time it starts."
+            "apply next time it starts.",
         )
-        self.status.setStyleSheet("color: palette(mid);")
         self.btn_launch.setVisible(True)
 
     def _on_geometry_from_widget(self, x: int, y: int, w: int, h: int) -> None:
@@ -456,8 +596,7 @@ class SettingsWindow(QWidget):
         try:
             self._config.clamped().save(self._path)
         except OSError as exc:
-            self.status.setText(f"Could not save: {exc}")
-            self.status.setStyleSheet("color: #c62828;")
+            self._set_status("error", f"Could not save: {exc}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Saving on close means arranging the widget by dragging it is enough;

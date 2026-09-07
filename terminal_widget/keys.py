@@ -11,6 +11,25 @@ from PySide6.QtGui import QKeyEvent
 
 #: DEC private mode 1 -- application cursor keys, as pyte records it.
 DECCKM = 1 << 5
+#: DEC private mode 2004 -- bracketed paste, recorded the same way.
+BRACKETED_PASTE = 2004 << 5
+
+#: Actions the widget performs itself instead of sending to the shell.
+SCROLL_PAGE_UP = "scroll_page_up"
+SCROLL_PAGE_DOWN = "scroll_page_down"
+SCROLL_TOP = "scroll_top"
+SCROLL_BOTTOM = "scroll_bottom"
+COPY = "copy"
+PASTE = "paste"
+
+#: Shift + these scroll the widget rather than reaching the shell. Shift is
+#: the usual modifier for this precisely because no shell binds it.
+_SCROLL_KEYS = {
+    Qt.Key.Key_PageUp: SCROLL_PAGE_UP,
+    Qt.Key.Key_PageDown: SCROLL_PAGE_DOWN,
+    Qt.Key.Key_Home: SCROLL_TOP,
+    Qt.Key.Key_End: SCROLL_BOTTOM,
+}
 
 #: Keys that switch between CSI and SS3 form depending on DECCKM.
 _CURSOR_KEYS = {
@@ -50,6 +69,33 @@ _FUNCTION_KEYS = {
     Qt.Key.Key_F11: "\x1b[23~",
     Qt.Key.Key_F12: "\x1b[24~",
 }
+
+
+def action_for(event: QKeyEvent) -> str | None:
+    """Return the widget action ``event`` asks for, or None to send it on.
+
+    Must be consulted *before* :func:`sequence_for`. Shift does not change
+    ``event.key()`` for letters, so Ctrl+Shift+C looks exactly like Ctrl+C
+    to the code below it -- checking afterwards would interrupt the running
+    program every time someone tried to copy.
+    """
+    key = Qt.Key(event.key())
+    mods = event.modifiers()
+    ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+    shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+    if shift and not ctrl:
+        if key in _SCROLL_KEYS:
+            return _SCROLL_KEYS[key]
+        if key == Qt.Key.Key_Insert:
+            return PASTE
+
+    if ctrl:
+        if shift and key == Qt.Key.Key_C:
+            return COPY
+        if key == Qt.Key.Key_V:  # with or without Shift
+            return PASTE
+    return None
 
 
 def sequence_for(event: QKeyEvent, app_cursor: bool = False) -> str | None:

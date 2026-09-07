@@ -25,3 +25,23 @@ def window(qapp):
     w.show()
     yield w
     w.close()
+
+
+@pytest.fixture
+def live(window):
+    """A widget window whose view has a screen, with no process behind it.
+
+    TerminalSession builds its screen and stream in __init__, so feeding the
+    stream directly exercises rendering, scrolling and selection without
+    spawning anything. ``_alive`` is set by hand because writes are dropped
+    otherwise, and several behaviours here are about what does and does not
+    reach the shell.
+    """
+    from terminal_widget.session import TerminalSession
+
+    cols, rows = window.view.grid_size()
+    session = TerminalSession(cols, rows, 200, window)
+    session._alive = True
+    window.view.session = session
+    window.session = session
+    return window

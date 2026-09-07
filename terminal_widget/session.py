@@ -12,6 +12,7 @@ import pyte
 from PySide6.QtCore import QObject, QThread, Signal
 
 from .pty import PtyBackend, open_pty
+from .screen import ScrollbackScreen
 
 #: Sane floor so a mis-measured font can never ask for a 0-column screen.
 MIN_COLS = 8
@@ -55,10 +56,16 @@ class TerminalSession(QObject):
     #: The shell exited.
     ended = Signal()
 
-    def __init__(self, cols: int, rows: int, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        cols: int,
+        rows: int,
+        scrollback: int = 0,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         cols, rows = max(MIN_COLS, cols), max(MIN_ROWS, rows)
-        self.screen = pyte.Screen(cols, rows)
+        self.screen = ScrollbackScreen(cols, rows, scrollback)
         self.stream = pyte.Stream(self.screen)
         self._backend: PtyBackend | None = None
         self._reader: _ReaderThread | None = None
@@ -76,10 +83,15 @@ class TerminalSession(QObject):
     def alive(self) -> bool:
         return self._alive
 
-    def start(self, argv: list[str], env: dict[str, str] | None = None) -> None:
+    def start(
+        self,
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
         """Spawn ``argv`` and begin pumping its output into the screen."""
         self._backend = open_pty()
-        self._backend.spawn(argv, self.cols, self.rows, env)
+        self._backend.spawn(argv, self.cols, self.rows, env, cwd)
         self._alive = True
 
         self._reader = _ReaderThread(self._backend, self)
@@ -99,6 +111,10 @@ class TerminalSession(QObject):
     def write(self, data: str) -> None:
         if self._backend is not None:
             self._backend.write(data)
+
+    def set_scrollback(self, scrollback: int) -> None:
+        """Change how many lines of scrollback are kept, without a restart."""
+        self.screen.set_scrollback(scrollback)
 
     def resize(self, cols: int, rows: int) -> None:
         """Resize screen and PTY together, so the shell redraws correctly."""

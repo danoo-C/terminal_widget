@@ -1,9 +1,12 @@
 import json
+from pathlib import Path
 
 from terminal_widget.config import (
     OPACITY_BACKGROUND,
+    OPACITY_WINDOW,
     Config,
     resolve_shell,
+    working_dir_for,
 )
 
 
@@ -100,3 +103,73 @@ def test_environment_drops_stale_size():
     finally:
         os.environ.pop("LINES", None)
         os.environ.pop("COLUMNS", None)
+
+
+# -- Opacity floors ---------------------------------------------------
+
+
+def test_background_mode_allows_full_transparency():
+    """Background-only fades nothing but the backdrop, so 0 is the point of
+    it: glyphs left floating on the desktop."""
+    cfg = Config(opacity=0, opacity_mode=OPACITY_BACKGROUND).clamped()
+    assert cfg.opacity == 0
+
+
+def test_window_mode_stops_before_the_widget_disappears():
+    cfg = Config(opacity=0, opacity_mode=OPACITY_WINDOW).clamped()
+    assert cfg.opacity == 10
+
+
+def test_a_nonsense_mode_falls_back_before_the_floor_is_applied():
+    """The floor depends on the mode, so clamping in the other order would
+    hold a background-mode config at 10%."""
+    cfg = Config(opacity=0, opacity_mode="sideways").clamped()
+    assert cfg.opacity_mode == OPACITY_BACKGROUND
+    assert cfg.opacity == 0
+
+
+# -- Scrollback -------------------------------------------------------
+
+
+def test_scrollback_clamps_to_its_range():
+    assert Config(scrollback=-5).clamped().scrollback == 0
+    assert Config(scrollback=10**9).clamped().scrollback == 50000
+
+
+# -- Working directory ------------------------------------------------
+
+
+def test_working_dir_defaults_to_the_shells_own_choice():
+    assert working_dir_for(Config()) is None
+
+
+def test_working_dir_expands_a_tilde(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert working_dir_for(Config(working_dir="~")) == str(tmp_path)
+
+
+def test_working_dir_expands_environment_variables(tmp_path, monkeypatch):
+    monkeypatch.setenv("SOMEWHERE", str(tmp_path))
+    assert working_dir_for(Config(working_dir="$SOMEWHERE")) == str(tmp_path)
+
+
+def test_a_missing_working_dir_is_ignored(tmp_path):
+    """A folder that has been renamed must not stop the widget starting:
+    the backends chdir in the child, so a bad path kills the shell before
+    it can say why."""
+    assert working_dir_for(Config(working_dir=str(tmp_path / "gone"))) is None
+
+
+def test_a_file_is_not_a_working_dir(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("x")
+    assert working_dir_for(Config(working_dir=str(target))) is None
+
+
+def test_clamped_does_not_touch_the_filesystem_for_working_dir():
+    """clamped() runs on every IPC message, which is every keystroke in the
+    settings app; it must not stat anything."""
+    assert Config(working_dir="/nowhere/at/all").clamped().working_dir == (
+        "/nowhere/at/all"
+    )

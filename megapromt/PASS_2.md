@@ -689,6 +689,22 @@ real Windows machine:
 - [ ] Geometry persists without drift (§3.1 — check whether Windows reports a
       frame offset for a frameless window)
 
+Added in pass 3, and unverified for the same reason:
+
+- [ ] The settings app is readable in Windows dark mode (this is what pass 3
+      fixed; the fix is derived from the live palette, so confirm it against the
+      real Windows palette rather than a synthetic one)
+- [ ] 0% background opacity leaves the widget clickable off the glyphs. The
+      backdrop is painted at alpha 1 rather than 0 precisely because a fully
+      transparent pixel of a *layered* window is click-through on Windows —
+      confirm whether Qt 6 actually takes that path, and drop the floor in
+      `TerminalView.backdrop_alpha` if it does not
+- [ ] `cwd` reaches the shell through ConPTY. The signature is confirmed
+      against the pywinpty 3.0.5 wheel -- `spawn(cls, argv, cwd=None,
+      env=None, dimensions=(24, 80))` -- so only the live behaviour is open
+- [ ] Wheel scrolling and drag-selection behave under the Windows WM
+- [ ] Ctrl+C copies with a selection and interrupts without one
+
 Expect `pty/windows.py` to need real changes. Budget for it.
 
 ---
@@ -766,9 +782,15 @@ Ranked by how much they could hurt.
 5. **Shell exit.** The widget closes when the shell exits. For something meant
    to live on the desktop permanently, respawning may be better. Make it a
    setting or make a deliberate choice.
-6. **Scrollback.** There is none, and no chrome to put a scrollbar in. Options:
-   keyboard-only scrolling, none at all, or `pyte.HistoryScreen` with a
-   modifier+wheel binding.
+6. **Scrollback.** ~~There is none, and no chrome to put a scrollbar in.~~
+   *Answered in pass 3:* the wheel scrolls, with no scrollbar and no chrome, plus
+   Shift+PageUp/Home for the keyboard. Not `pyte.HistoryScreen` -- it wraps every
+   stream event through `__getattribute__`, which measured 2.6x slower than a
+   plain `Screen` on the same input, and its paging API mutates the live buffer.
+   `screen.py` subclasses `pyte.Screen` instead and keeps retired lines in one
+   absolute row space, which the selection is anchored to as well. Still open
+   underneath it: no reflow on a width change, and growing the window does not
+   pull lines back out of history.
 7. **HiDPI and fractional scaling.** Untested. Cell metrics are computed from
    `QFontMetricsF`, which should scale, but "should" is doing work there.
 8. **Resize granularity.** Free-pixel resizing leaves partial cells at the

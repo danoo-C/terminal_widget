@@ -14,10 +14,15 @@ class PosixPty(PtyBackend):
         self._proc: PtyProcessUnicode | None = None
 
     def spawn(
-        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+        self,
+        argv: list[str],
+        cols: int,
+        rows: int,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> None:
         self._proc = PtyProcessUnicode.spawn(
-            argv, dimensions=(rows, cols), env=env or dict(os.environ)
+            argv, cwd=cwd, dimensions=(rows, cols), env=env or dict(os.environ)
         )
 
     def read(self, size: int = 4096) -> str:
