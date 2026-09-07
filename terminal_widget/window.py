@@ -13,7 +13,7 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from .config import OPACITY_BACKGROUND, Config, resolve_shell
+from .config import OPACITY_BACKGROUND, Config, environment_for, resolve_shell
 from .renderer import TerminalView
 from .session import TerminalSession
 
@@ -97,7 +97,9 @@ class WidgetWindow(QWidget):
         self.session.screenUpdated.connect(self.view.update)
         self.session.ended.connect(self._on_session_ended)
         self.view.session = self.session
-        self.session.start(resolve_shell(self._config))
+        self.session.start(
+            resolve_shell(self._config), environment_for(self._config)
+        )
         self.view.setFocus()
 
     def _on_session_ended(self) -> None:
@@ -125,6 +127,16 @@ class WidgetWindow(QWidget):
     def config_mode(self) -> bool:
         return self._config_mode
 
+    @property
+    def config(self) -> Config:
+        """The settings currently in effect, live geometry included.
+
+        Not the object the window was constructed with: applying settings
+        from the settings app swaps in a new one, so anything that saves
+        must ask the window rather than hold on to what it loaded.
+        """
+        return self._config
+
     # -- Live settings ------------------------------------------------
 
     def apply_config(self, config: Config) -> None:
@@ -142,7 +154,8 @@ class WidgetWindow(QWidget):
         if config.opacity_mode != previous.opacity_mode or config.opacity != previous.opacity:
             self._apply_window_opacity()
 
-        if target != (self.x(), self.y(), self.width(), self.height()):
+        geom = self.geometry()
+        if target != (geom.x(), geom.y(), geom.width(), geom.height()):
             self.setGeometry(*target)
 
     def _apply_window_opacity(self) -> None:
@@ -174,9 +187,27 @@ class WidgetWindow(QWidget):
         self._emit_geometry()
 
     def _emit_geometry(self) -> None:
-        self._config.x, self._config.y = self.x(), self.y()
-        self._config.width, self._config.height = self.width(), self.height()
-        self.geometryEdited.emit(self.x(), self.y(), self.width(), self.height())
+        """Record geometry the *user* chose, in client coordinates.
+
+        Two traps here, both of which caused the widget to drift across the
+        screen on every launch:
+
+        1. ``QWidget.x()``/``y()`` report the frame position, while
+           ``setGeometry`` takes client coordinates. Some window managers
+           (WSLg's among them) put a frame around a frameless window, so
+           saving x()/y() and restoring it with setGeometry shifted the
+           window by the frame offset each time. ``geometry()`` is in the
+           same coordinates we place with, so it round-trips exactly.
+        2. Window managers move windows for their own reasons. In locked
+           mode the user cannot move anything, so any change is the WM's
+           and must not be written back as if it were intent.
+        """
+        if not self._config_mode:
+            return
+        geom = self.geometry()
+        self._config.x, self._config.y = geom.x(), geom.y()
+        self._config.width, self._config.height = geom.width(), geom.height()
+        self.geometryEdited.emit(geom.x(), geom.y(), geom.width(), geom.height())
 
     # -- Drag and resize (config mode only) ---------------------------
 

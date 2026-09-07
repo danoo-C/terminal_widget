@@ -76,10 +76,10 @@ class TerminalSession(QObject):
     def alive(self) -> bool:
         return self._alive
 
-    def start(self, argv: list[str]) -> None:
+    def start(self, argv: list[str], env: dict[str, str] | None = None) -> None:
         """Spawn ``argv`` and begin pumping its output into the screen."""
         self._backend = open_pty()
-        self._backend.spawn(argv, self.cols, self.rows)
+        self._backend.spawn(argv, self.cols, self.rows, env)
         self._alive = True
 
         self._reader = _ReaderThread(self._backend, self)

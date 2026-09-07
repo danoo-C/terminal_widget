@@ -14,7 +14,9 @@ class PtyBackend(ABC):
     """
 
     @abstractmethod
-    def spawn(self, argv: list[str], cols: int, rows: int) -> None:
+    def spawn(
+        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+    ) -> None:
         """Start ``argv`` on a PTY sized ``cols`` x ``rows``."""
 
     @abstractmethod

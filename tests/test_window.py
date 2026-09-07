@@ -113,24 +113,62 @@ def test_middle_is_not_an_edge(window):
 # -- Geometry writeback -----------------------------------------------
 
 
-def test_move_updates_config(window):
-    window.move(321, 222)
-    assert (window._config.x, window._config.y) == (window.x(), window.y())
+def test_config_mode_move_updates_config(window):
+    window.set_config_mode(True)
+    window.setGeometry(321, 222, 640, 320)
+    assert (window._config.x, window._config.y) == (321, 222)
 
 
-def test_resize_updates_config(window):
-    window.resize(500, 400)
-    assert (window._config.width, window._config.height) == (
-        window.width(),
-        window.height(),
-    )
+def test_config_mode_resize_updates_config(window):
+    window.set_config_mode(True)
+    window.setGeometry(100, 100, 500, 400)
+    assert (window._config.width, window._config.height) == (500, 400)
 
 
-def test_geometry_signal_fires(window):
+def test_geometry_signal_fires_in_config_mode(window):
+    window.set_config_mode(True)
     seen = []
     window.geometryEdited.connect(lambda *a: seen.append(a))
-    window.move(400, 300)
+    window.setGeometry(400, 300, 640, 320)
     assert seen
+
+
+def test_locked_mode_ignores_geometry_changes(window):
+    """A window manager moving the window is not user intent.
+
+    Locked mode offers no way to move the window, so anything that does is
+    the WM. Writing that back and saving it made the widget drift across
+    the screen a little further on every launch.
+    """
+    window.set_config_mode(False)
+    before = (window._config.x, window._config.y)
+    seen = []
+    window.geometryEdited.connect(lambda *a: seen.append(a))
+    window.setGeometry(777, 666, 500, 400)
+    assert (window._config.x, window._config.y) == before
+    assert not seen
+
+
+def test_geometry_round_trips_exactly(window):
+    """What we save must be what we can restore.
+
+    setGeometry takes client coordinates but x()/y() report the frame, and
+    a WM that frames a frameless window makes those differ. Saving one and
+    restoring as the other shifted the window by the frame offset each run.
+    """
+    window.set_config_mode(True)
+    window.setGeometry(432, 321, 555, 444)
+    # Snapshot into a detached Config, the way a save/reload would.
+    saved = Config(
+        x=window._config.x,
+        y=window._config.y,
+        width=window._config.width,
+        height=window._config.height,
+    )
+    window.setGeometry(0, 0, 200, 200)
+    window.apply_config(saved)
+    g = window.geometry()
+    assert (g.x(), g.y(), g.width(), g.height()) == (432, 321, 555, 444)
 
 
 # -- Opacity ----------------------------------------------------------
@@ -154,3 +192,12 @@ def test_apply_config_moves_and_resizes(window):
     window.apply_config(Config(x=250, y=260, width=800, height=500))
     assert (window.x(), window.y()) == (250, 260)
     assert (window.width(), window.height()) == (800, 500)
+
+
+def test_config_property_tracks_applied_settings(window):
+    """apply_config swaps in a new Config object; anything that saves must
+    read it back from the window, not hold the one it loaded."""
+    replacement = Config(x=11, y=22, width=333, height=244, opacity=70)
+    window.apply_config(replacement)
+    assert window.config is replacement
+    assert (window.config.x, window.config.y) == (11, 22)

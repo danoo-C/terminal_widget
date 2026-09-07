@@ -59,3 +59,44 @@ def test_custom_command_is_split():
 def test_blank_custom_command_falls_back():
     """An empty custom command must not spawn an empty argv."""
     assert resolve_shell(Config(shell="custom", custom_command="   "))
+
+
+def test_separate_history_redirects_histfile():
+    """Commands typed into the widget must not rewrite the login shell's
+    history file."""
+    from terminal_widget.config import environment_for, history_path
+
+    env = environment_for(Config(separate_history=True))
+    assert env["HISTFILE"] == str(history_path())
+
+
+def test_shared_history_leaves_histfile_alone():
+    from terminal_widget.config import environment_for
+
+    env = environment_for(Config(separate_history=False))
+    assert "HISTFILE" not in env or env.get("HISTFILE") != str(
+        __import__("terminal_widget.config", fromlist=["x"]).history_path()
+    )
+
+
+def test_environment_announces_a_terminal_we_emulate():
+    from terminal_widget.config import environment_for
+
+    assert environment_for(Config())["TERM"] == "xterm-256color"
+
+
+def test_environment_drops_stale_size():
+    """LINES/COLUMNS inherited from the launching terminal would override
+    the PTY's real size."""
+    import os
+
+    from terminal_widget.config import environment_for
+
+    os.environ["LINES"] = "99"
+    os.environ["COLUMNS"] = "99"
+    try:
+        env = environment_for(Config())
+        assert "LINES" not in env and "COLUMNS" not in env
+    finally:
+        os.environ.pop("LINES", None)
+        os.environ.pop("COLUMNS", None)

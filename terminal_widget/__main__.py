@@ -11,6 +11,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from .config import Config, config_path
+from .ipc import WidgetServer
 from .window import WidgetWindow
 
 
@@ -26,12 +27,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help=f"config file to use (default: {config_path()})",
     )
-    parser.add_argument(
-        "--config-mode",
-        action="store_true",
-        help="start in config mode (drag/resize enabled). Temporary: normally "
-        "the settings app decides this by connecting.",
-    )
     return parser.parse_args(argv)
 
 
@@ -43,9 +38,35 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("terminal_widget")
 
     window = WidgetWindow(config)
-    window.set_config_mode(args.config_mode)
     window.show()
     window.start_session()
+
+    # The settings app connecting is what enables config mode; the socket
+    # dropping is what ends it. A crashed settings app therefore looks the
+    # same as one that quit, so the widget can never get stuck.
+    server = WidgetServer(app)
+
+    def on_mode(enabled: bool) -> None:
+        window.set_config_mode(enabled)
+        if enabled:
+            # Tell the settings app where we actually are, so its fields
+            # start out truthful rather than showing the last saved values.
+            geom = window.geometry()
+            server.send_geometry(geom.x(), geom.y(), geom.width(), geom.height())
+        else:
+            # Leaving config mode is the moment the arrangement is final.
+            _save(window.config, args.config)
+
+    server.configModeChanged.connect(on_mode)
+    server.configReceived.connect(window.apply_config)
+    window.geometryEdited.connect(server.send_geometry)
+
+    if not server.start():
+        print(
+            "warning: could not open the settings socket; the settings app "
+            "will not be able to reach this widget.",
+            file=sys.stderr,
+        )
 
     # Ctrl+C in the launching terminal should close the widget. Qt's event
     # loop blocks Python's signal handling, so poke the interpreter awake.
@@ -57,12 +78,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return app.exec()
     finally:
-        # The user may have dragged or resized in config mode; that is the
-        # authoritative geometry, so keep it.
-        try:
-            config.clamped().save(args.config)
-        except OSError:
-            pass
+        server.stop()
+        _save(window.config, args.config)
+
+
+def _save(config: Config, path: Path | None) -> None:
+    try:
+        config.clamped().save(path)
+    except OSError:
+        pass  # a read-only config dir must not take the widget down
 
 
 if __name__ == "__main__":

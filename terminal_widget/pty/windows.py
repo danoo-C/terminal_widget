@@ -15,11 +15,12 @@ class WindowsPty(PtyBackend):
     def __init__(self) -> None:
         self._proc = None
 
-    def spawn(self, argv: list[str], cols: int, rows: int) -> None:
+    def spawn(
+        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+    ) -> None:
         from winpty import PtyProcess  # imported late: Windows-only dependency
 
-        env = dict(os.environ)
-        env["TERM"] = "xterm-256color"
+        env = env or dict(os.environ)
         # pywinpty takes a command line, not an argv list. Anything needing
         # quoting should come through config as a "custom" command already
         # shaped the way Windows expects.

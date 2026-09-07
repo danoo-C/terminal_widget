@@ -13,15 +13,11 @@ class PosixPty(PtyBackend):
     def __init__(self) -> None:
         self._proc: PtyProcessUnicode | None = None
 
-    def spawn(self, argv: list[str], cols: int, rows: int) -> None:
-        env = dict(os.environ)
-        # Advertise a terminal we can actually emulate, and drop any
-        # inherited size so the shell asks the PTY instead.
-        env["TERM"] = "xterm-256color"
-        env.pop("LINES", None)
-        env.pop("COLUMNS", None)
+    def spawn(
+        self, argv: list[str], cols: int, rows: int, env: dict[str, str] | None = None
+    ) -> None:
         self._proc = PtyProcessUnicode.spawn(
-            argv, dimensions=(rows, cols), env=env
+            argv, dimensions=(rows, cols), env=env or dict(os.environ)
         )
 
     def read(self, size: int = 4096) -> str:

@@ -9,11 +9,10 @@ free of UI clutter.
 
 Runs on **Linux** and **Windows**.
 
-> **Status: the widget works; the settings app does not exist yet.**
-> The widget spawns a shell, renders it, and takes input. Both modes are
-> implemented and tested. What is missing is the settings app itself and the
-> IPC link that would let it drive config mode -- until then, `--config-mode`
-> turns config mode on by hand.
+> **Status: both apps work.** The widget spawns a shell, renders it, and takes
+> input; the settings app drives it live over a local socket. Opening settings
+> puts the widget into config mode and closing settings takes it out, exactly
+> as described below. Not yet verified on Windows.
 
 ---
 
@@ -147,6 +146,18 @@ Two opacity behaviours, selectable:
 
 Font family, font size, and color scheme also live here.
 
+### Behaviour
+
+| Setting | Type | Notes |
+| --- | --- | --- |
+| Keep shell history separate | on/off | On by default. |
+
+With this on, the widget's shell writes to its own history file
+(`~/.config/terminal_widget/shell_history`) instead of the one your login
+shell uses. A widget you type the occasional command into should not be
+rewriting the history of the terminal you actually work in. Turn it off to
+share one history with everything else.
+
 ---
 
 ## Planned architecture
@@ -251,12 +262,14 @@ Without these, Qt fails with `libEGL.so.1: cannot open shared object file` or
 ### Running
 
 ```bash
-python -m terminal_widget                 # the widget, in locked mode
-python -m terminal_widget --config-mode    # drag and resize enabled
+python -m terminal_widget            # the widget
+python -m terminal_widget.settings   # the settings app
 ```
 
-`--config-mode` is temporary scaffolding. Once the settings app exists, opening
-it is what enables config mode, exactly as specified above.
+Start the widget first, then open settings whenever you want to move, resize or
+reconfigure it. The settings app can also launch the widget itself, and if you
+open settings with no widget running it still edits the config file for next
+time.
 
 ### Tests
 
@@ -282,10 +295,10 @@ terminal_widget/
 │   │   ├── base.py        # the backend interface                 [done]
 │   │   ├── posix.py       # ptyprocess backend                    [done]
 │   │   └── windows.py     # pywinpty backend            [done, untested]
-│   ├── ipc.py             # local socket to the settings app       [todo]
+│   ├── ipc.py             # local socket to the settings app      [done]
 │   └── settings/
-│       └── __main__.py    # settings app entry point               [todo]
-├── tests/                 # 50 tests, offscreen                   [done]
+│       └── __main__.py    # settings app entry point              [done]
+├── tests/                 # 70 tests, offscreen                   [done]
 ├── LICENSE
 └── README.md
 ```
@@ -305,6 +318,10 @@ Things that will need deciding or discovering as the code gets written:
   supported API on Windows.
 - **Resize granularity.** Free-pixel resizing leaves partial character cells at
   the edges; snapping to whole cells fights the OS resize handles. Needs a call.
+- **Frame vs client coordinates.** Some window managers put a frame around a
+  frameless window. The widget stores client coordinates throughout, because
+  `setGeometry` uses them while `QWidget.x()` reports the frame -- mixing the
+  two made the widget drift by the frame offset on every launch.
 - **Font rendering performance.** Repainting a full character grid per frame can
   be slow if done naively; will likely need dirty-region tracking.
 - **Scrollback.** Whether the widget keeps any at all, given the no-chrome goal —

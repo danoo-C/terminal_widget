@@ -33,6 +33,11 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
+def history_path() -> Path:
+    """History file used when ``separate_history`` is on."""
+    return config_dir() / "shell_history"
+
+
 def _default_font() -> str:
     if sys.platform == "win32":
         return "Cascadia Mono"
@@ -55,6 +60,10 @@ class Config:
     # -- Shell. `shell` is a preset key; "custom" defers to `custom_command`.
     shell: str = "default"
     custom_command: str = ""
+    #: Keep the widget's shell history out of the login shell's history file.
+    #: A desktop widget you type the odd command into should not rewrite the
+    #: history of the terminal you actually work in.
+    separate_history: bool = True
 
     # -- Appearance
     opacity: int = 100  # 0-100
@@ -134,6 +143,32 @@ def available_shells() -> list[tuple[str, str]]:
     out += [(key, label) for key, label, argv in presets if shutil.which(argv[0])]
     out.append(("custom", "Custom command..."))
     return out
+
+
+def environment_for(cfg: Config) -> dict[str, str]:
+    """Environment for the widget's shell.
+
+    Beyond announcing a terminal we can emulate, this optionally redirects
+    shell history so commands typed into the widget do not end up in the
+    history of the user's real terminal.
+    """
+    env = dict(os.environ)
+    env["TERM"] = "xterm-256color"
+    # Let the shell take its size from the PTY, not from stale inherited values.
+    env.pop("LINES", None)
+    env.pop("COLUMNS", None)
+
+    if cfg.separate_history:
+        path = history_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        # HISTFILE covers bash and zsh; fish reads fish_history as a session
+        # name rather than a path, so it gets its own namespace instead.
+        env["HISTFILE"] = str(path)
+        env["fish_history"] = APP_NAME
+    return env
 
 
 def resolve_shell(cfg: Config) -> list[str]:
