@@ -46,11 +46,27 @@ config.local.*
 *.log
 logs/
 
-# ---- Editors / IDEs ----
+# ---- Editors / IDEs / agent tooling ----
 .idea/
 .idea
 .vscode/
 .vscode
+.claude/
+
+# Claude Code's sandbox shadows these paths with empty placeholder files at
+# session start, to stop anything reading or writing them. They are artifacts
+# of the tool, not of the project, and they come back every session.
+# .gitmodules is deliberately absent: it is a real git file and must stay
+# trackable if this ever grows a submodule. It is excluded locally instead,
+# in .git/info/exclude.
+.bashrc
+.bash_profile
+.profile
+.zshrc
+.zprofile
+.gitconfig
+.mcp.json
+.ripgreprc
 *.swp
 *.swo
 *~
