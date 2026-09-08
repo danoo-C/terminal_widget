@@ -11,7 +11,7 @@ Runs on **Linux** and **Windows**.
 
 > **Status: installable and working on Linux.** One command installs
 > everything -- a private environment, launcher entries, optional autostart,
-> and an uninstaller. The widget and settings app both work, and 258 tests
+> and an uninstaller. The widget and settings app both work, and 277 tests
 > cover them. **Not yet verified on Windows:** the code is there and the paths
 > are right, but it has never been run.
 
@@ -40,7 +40,7 @@ That means:
 
 | Component | What it is |
 | --- | --- |
-| **Widget** (`terminal_widget`) | The borderless window. Spawns a shell in a pseudo-terminal, renders its output, forwards your keystrokes. Reads config; never asks questions. |
+| **Widget** (`terminal_widget`) | The borderless window. Spawns a shell in a pseudo-terminal, renders its output, forwards your keystrokes. Reads config; never asks questions. One runs per config file; a second launch brings the first to the front instead of starting a rival to it. |
 | **Settings app** (`terminal_widget.settings`) | A normal, decorated window. Edits the config — geometry, shell, opacity, appearance — and puts the widget into config mode for as long as it is open. |
 
 Both are launched from the same package, so a single install gives you both.
@@ -418,6 +418,27 @@ reconfigure it. The settings app can also launch the widget itself, and if you
 open settings with no widget running it still edits the config file for next
 time.
 
+The button at the bottom left reads **Launch widget** when none is running and
+**Restart widget** when one is. Restart is how the settings that are only read at
+launch — the shell, its working directory, and the startup scroll — take effect
+without you going to the tray. It saves first, asks the running widget to quit,
+and the widget starts its replacement itself once it has let go of everything;
+nothing else knows when that has happened.
+
+**One widget runs per config file.** Two widgets sharing a config each hold their
+own copy of it and each write the whole thing back when they exit, so the second
+one to quit silently reverts everything you changed in between. A lock file beside
+the config (`config.json.lock`) is what prevents that, so launching a second widget
+brings the first one to the front and exits rather than starting one. Pass
+`--config PATH` to both the widget and the settings app to run a second, separate
+widget on a second config file — that is the supported way to try a different
+layout without disturbing the one you use.
+
+One upgrade note: quit any running widget before installing a new version. The
+socket is named after the config file from this release on, so a widget from an
+older build and a widget from this one cannot see each other, and would go back
+to fighting over the config for that one session.
+
 ### The tray icon
 
 Because the widget has no taskbar button, no Alt+Tab entry and no close button,
@@ -471,7 +492,8 @@ terminal_widget/
 │   ├── keys.py            # Qt key events -> escape sequences
 │   ├── config.py          # load / save / defaults / shells
 │   ├── platform_info.py   # platform facts, stdlib only
-│   ├── ipc.py             # local socket to the settings app
+│   ├── ipc.py             # local socket to the settings app, and the one-widget lock
+│   ├── launch.py          # starting a widget: one place, so three callers agree
 │   ├── tray.py            # tray icon: the way back to a covered widget
 │   ├── pty/               # ptyprocess (Linux) / pywinpty (Windows)
 │   ├── autostart/         # XDG entry (Linux) / Run key (Windows)

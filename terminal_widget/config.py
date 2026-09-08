@@ -6,10 +6,12 @@ shape defined by :class:`Config`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -62,6 +64,17 @@ def config_dir() -> Path:
 
 def config_path() -> Path:
     return config_dir() / "config.json"
+
+
+def lock_path(path: Path | None = None) -> Path:
+    """The one-widget lock for a config file, beside the file itself.
+
+    On disk rather than on the socket, because taking it is atomic: two
+    widgets starting at the same moment cannot both win it, which is exactly
+    what two widgets racing to clean up a stale socket could do.
+    """
+    target = path or config_path()
+    return target.with_name(target.name + ".lock")
 
 
 def history_path() -> Path:
@@ -163,12 +176,25 @@ class Config:
         return cls(**{k: v for k, v in raw.items() if k in known}).clamped()
 
     def save(self, path: Path | None = None) -> None:
-        """Write config atomically, so a crash mid-write can't corrupt it."""
+        """Write config atomically, so a crash mid-write can't corrupt it.
+
+        The temp file gets a unique name rather than a fixed ``.json.tmp``.
+        ``os.replace`` is atomic, but two writers sharing one temp name are
+        not: they interleave into the same file and can publish a spliced
+        document between them. The widget and the settings app both write
+        this file, so that is not hypothetical.
+        """
         path = path or config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(asdict(self), indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
 
 # -- Shell presets ---------------------------------------------------
