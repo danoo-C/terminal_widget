@@ -17,8 +17,9 @@ def settings(qapp, monkeypatch):
     from terminal_widget.ipc import SettingsClient
     from terminal_widget.settings.__main__ import SettingsWindow
 
-    # Never open a socket from a test.
-    monkeypatch.setattr(SettingsClient, "start", lambda self: None)
+    # Never open a socket from a test. Takes `name` because the settings app
+    # passes the per-config socket name.
+    monkeypatch.setattr(SettingsClient, "start", lambda self, name=None: None)
     window = SettingsWindow(Config(), None)
     yield window
     window.close()
@@ -128,3 +129,82 @@ def test_ticking_scroll_to_top_reaches_the_widget(settings):
     settings.client.send_config = sent.append
     settings.check_scroll_top.setChecked(True)
     assert sent and sent[-1].scroll_top_on_start is True
+
+
+# -- One widget, and the button that restarts it -----------------------
+
+
+@pytest.fixture
+def spawns(monkeypatch):
+    """Capture what would have been launched."""
+    from terminal_widget import launch as launch_module
+
+    calls = []
+
+    class FakeProcess:
+        @staticmethod
+        def startDetached(program, args):  # noqa: N802
+            calls.append((program, args))
+            return True, 1234
+
+    monkeypatch.setattr(launch_module, "QProcess", FakeProcess)
+    return calls
+
+
+def connected(monkeypatch, yes=True):
+    from terminal_widget.ipc import SettingsClient
+
+    monkeypatch.setattr(SettingsClient, "is_connected", property(lambda self: yes))
+
+
+def test_the_button_offers_launch_when_no_widget_is_running(settings, monkeypatch):
+    connected(monkeypatch, False)
+    settings._refresh_launch_button()
+    assert settings.btn_launch.text() == "Launch widget"
+    assert settings.btn_launch.isEnabled()
+
+
+def test_the_button_offers_restart_while_a_widget_is_running(settings, monkeypatch):
+    """It used to hide itself instead, which left it armed and clickable for
+    the second before this app reached a widget that was already running."""
+    connected(monkeypatch, True)
+    settings._refresh_launch_button()
+    assert settings.btn_launch.text() == "Restart widget"
+
+
+def test_restarting_asks_the_widget_rather_than_starting_a_second_one(
+    settings, monkeypatch, spawns
+):
+    connected(monkeypatch, True)
+    sent = []
+    settings.client.send_quit = lambda restart=False: sent.append(restart)
+    settings._launch_widget()
+    assert sent == [True]
+    assert spawns == []  # the widget starts its own replacement
+
+
+def test_one_click_is_one_widget_however_fast_you_click(settings, monkeypatch, spawns):
+    """The 400ms window that made two widgets possible from one button."""
+    connected(monkeypatch, False)
+    settings._launch_widget()
+    settings._launch_widget()
+    assert len(spawns) == 1
+
+
+def test_the_widget_is_launched_with_the_settings_apps_own_config(
+    settings, monkeypatch, spawns, tmp_path
+):
+    connected(monkeypatch, False)
+    settings._path = tmp_path / "elsewhere.json"
+    settings._launch_widget()
+    assert spawns and "--config" in spawns[0][1]
+    assert str(tmp_path / "elsewhere.json") in spawns[0][1]
+
+
+def test_a_widget_that_never_arrives_is_reported(settings, monkeypatch, spawns):
+    connected(monkeypatch, False)
+    settings._launch_widget()
+    assert settings._waiting
+    settings._settle()
+    assert not settings._waiting
+    assert "did not start" in settings.status.text()

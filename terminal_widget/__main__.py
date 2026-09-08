@@ -7,11 +7,12 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication
 
 from .config import Config, config_path
-from .ipc import WidgetServer
+from .launch import spawn_widget
+from .ipc import WidgetServer, instance_lock, request_show, socket_name
 from .tray import WidgetTray
 from .window import WidgetWindow
 
@@ -33,6 +34,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # Before the config is even read, and well before a Qt platform plugin or
+    # a shell: one widget per config file. Two widgets sharing a config each
+    # hold a snapshot of it and each write the whole thing back on the way
+    # out, so the second to quit silently reverts everything the user changed.
+    lock = instance_lock(args.config)
+    if lock.error() == QLockFile.LockError.LockFailedError:
+        # Launching is meant to hand you your widget. You have one, so bring
+        # it forward rather than starting a rival to it.
+        request_show(socket_name(args.config))
+        return 0
+    if lock.error() != QLockFile.LockError.NoError:
+        # Nowhere to put the lock is nearly always nowhere to put the config
+        # either, and refusing to start over that would be worse than the
+        # thing it guards against.
+        print(
+            "warning: could not take the single-widget lock; a second widget "
+            "on this config would not be stopped.",
+            file=sys.stderr,
+        )
+
     config = Config.load(args.config)
 
     app = QApplication(sys.argv[:1])
@@ -42,6 +64,14 @@ def main(argv: list[str] | None = None) -> int:
     # loop on its own; window.closed below is what does, and it fires only
     # once the shell is torn down.
     app.setQuitOnLastWindowClosed(False)
+
+    server = WidgetServer(app)
+    if not server.start(socket_name(args.config)):
+        print(
+            "warning: could not open the settings socket; the settings app "
+            f"will not be able to reach this widget ({server.error}).",
+            file=sys.stderr,
+        )
 
     window = WidgetWindow(config)
     window.closed.connect(app.quit)
@@ -58,11 +88,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    # The settings app connecting is what enables config mode; the socket
-    # dropping is what ends it. A crashed settings app therefore looks the
-    # same as one that quit, so the widget can never get stuck.
-    server = WidgetServer(app)
-
+    # The settings app introducing itself is what enables config mode; the
+    # socket dropping is what ends it. A crashed settings app therefore looks
+    # the same as one that quit, so the widget can never get stuck.
     def on_mode(enabled: bool) -> None:
         window.set_config_mode(enabled)
         if enabled:
@@ -76,14 +104,20 @@ def main(argv: list[str] | None = None) -> int:
 
     server.configModeChanged.connect(on_mode)
     server.configReceived.connect(window.apply_config)
-    window.geometryEdited.connect(server.send_geometry)
+    server.showRequested.connect(window.bring_to_front)
 
-    if not server.start():
-        print(
-            "warning: could not open the settings socket; the settings app "
-            "will not be able to reach this widget.",
-            file=sys.stderr,
-        )
+    relaunch = False
+
+    def on_quit(restart: bool) -> None:
+        nonlocal relaunch
+        relaunch = restart
+        # close(), not app.quit(): quit() skips closeEvent, which is where the
+        # PTY child is terminated and the reader thread joined. Same reasoning
+        # as the tray's Quit entry.
+        window.close()
+
+    server.quitRequested.connect(on_quit)
+    window.geometryEdited.connect(server.send_geometry)
 
     # Ctrl+C in the launching terminal should close the widget. Qt's event
     # loop blocks Python's signal handling, so poke the interpreter awake.
@@ -95,8 +129,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return app.exec()
     finally:
+        # The order is the whole design of Restart. We are the only party that
+        # knows when we have finished letting go, so we are the one that
+        # starts the replacement: socket first, then the config it will read,
+        # then the lock that would otherwise turn it away at the door.
         server.stop()
         _save(window.config, args.config)
+        lock.unlock()
+        if relaunch:
+            spawn_widget(args.config)
 
 
 def _save(config: Config, path: Path | None) -> None:

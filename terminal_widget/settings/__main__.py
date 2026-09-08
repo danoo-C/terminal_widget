@@ -12,7 +12,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -57,9 +57,14 @@ from ..config import (
     min_opacity,
     working_dir_for,
 )
-from ..ipc import SettingsClient
+from ..ipc import SettingsClient, socket_name
+from ..launch import spawn_widget
 from ..platform_info import DISPLAY_NAME, icon_path, widget_launcher
 from .theme import muted_color, status_colors
+
+#: How long to wait for a widget we asked for before admitting it is not
+#: coming. Only ever reached when the widget failed to start at all.
+SETTLE_MS = 5000
 
 
 class SettingsWindow(QWidget):
@@ -81,6 +86,11 @@ class SettingsWindow(QWidget):
             self.setWindowIcon(QIcon(str(icon)))
         self.setMinimumWidth(460)
 
+        # One widget per config file, so the socket to look for depends on
+        # which config this app was pointed at.
+        self._socket_name = socket_name(path)
+        #: A widget has been asked for and has not arrived yet.
+        self._waiting = False
         self.client = SettingsClient(self)
         self.client.connected.connect(self._on_connected)
         self.client.disconnected.connect(self._on_disconnected)
@@ -127,7 +137,7 @@ class SettingsWindow(QWidget):
 
         self._load_into_ui()
         self._refresh_autostart()
-        self.client.start()
+        self.client.start(self._socket_name)
         self._on_disconnected()
 
     # -- Theming -----------------------------------------------------
@@ -597,21 +607,23 @@ class SettingsWindow(QWidget):
     # -- Widget connection --------------------------------------------
 
     def _on_connected(self) -> None:
+        self._waiting = False
         self._set_status(
             "ok",
             "Connected -- the widget is in config mode. Drag it to move, drag "
             "its edges to resize.",
         )
-        self.btn_launch.setVisible(False)
+        self._refresh_launch_button()
         self.client.send_config(self._config)
 
     def _on_disconnected(self) -> None:
-        self._set_status(
-            "info",
-            "No widget running. Changes are saved to the config file and will "
-            "apply next time it starts.",
-        )
-        self.btn_launch.setVisible(True)
+        if not self._waiting:
+            self._set_status(
+                "info",
+                "No widget running. Changes are saved to the config file and "
+                "will apply next time it starts.",
+            )
+        self._refresh_launch_button()
 
     def _on_geometry_from_widget(self, x: int, y: int, w: int, h: int) -> None:
         """The user dragged or resized the widget; follow along."""
@@ -624,15 +636,65 @@ class SettingsWindow(QWidget):
         self._config = self._config_from_ui()
         self._refresh_derived()
 
-    def _launch_widget(self) -> None:
-        from PySide6.QtCore import QProcess
+    def _refresh_launch_button(self) -> None:
+        """One button, two jobs, named for whichever one it can do.
 
+        It used to hide itself once a widget connected, which left it visible
+        and armed for the second between this app opening and its client
+        reaching a widget that was already running -- long enough to click,
+        and a second widget is what wrecks the config. Disabling it while a
+        widget is on its way closes the other half of that window, before the
+        lock is ever consulted.
+        """
+        if self._waiting:
+            self.btn_launch.setText("Starting widget...")
+            self.btn_launch.setEnabled(False)
+            self.btn_launch.setToolTip("")
+            return
+        running = self.client.is_connected
+        self.btn_launch.setEnabled(True)
+        self.btn_launch.setText("Restart widget" if running else "Launch widget")
+        self.btn_launch.setToolTip(
+            "Stop the running widget and start it again. The shell, its "
+            "working directory and the startup scroll are read when the widget "
+            "launches, so this is how those take effect."
+            if running
+            else "Start the widget with these settings."
+        )
+
+    def _launch_widget(self) -> None:
+        """Launch, or restart if one is already running.
+
+        A restart is asked of the widget rather than done to it: it is the
+        only party that knows when it has let go of its socket and its lock,
+        so it starts its own replacement. Doing it from here would mean
+        guessing, and a wrong guess leaves the user with no widget at all.
+        """
+        if self._waiting:
+            return
         self._save()
-        args = ["-m", "terminal_widget"]
-        if self._path is not None:
-            args += ["--config", str(self._path)]
-        QProcess.startDetached(sys.executable, args)
-        QTimer.singleShot(400, self.client.start)
+        if self.client.is_connected:
+            self.client.send_quit(restart=True)
+            self._set_status("info", "Restarting the widget...")
+        elif not spawn_widget(self._path):
+            self._set_status("error", "Could not start the widget.")
+            return
+        self._waiting = True
+        self._refresh_launch_button()
+        QTimer.singleShot(SETTLE_MS, self._settle)
+
+    def _settle(self) -> None:
+        """Stop waiting, whether or not the widget turned up."""
+        if not self._waiting:
+            return
+        self._waiting = False
+        self._refresh_launch_button()
+        if not self.client.is_connected:
+            self._set_status(
+                "error",
+                "The widget did not start. Run terminal-widget-debug from a "
+                "terminal to see why.",
+            )
 
     # -- Persistence ---------------------------------------------------
 

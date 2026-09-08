@@ -622,3 +622,135 @@ Still nothing run on Windows.
 - [ ] With **Scroll to the top when the shell starts** on, the banner reads from
       line 1 and the first keystroke returns to the prompt; with it off, nothing
       changed
+
+---
+
+## 3. Two widgets can run at once, and two widgets wreck the config
+
+**Status:** fixed in code, unverified on Windows. Found in real use on Windows,
+2026-09-08; fixed 2026-09-08.
+
+### What happens
+
+Two widget processes run at the same time on one config file, and the config
+comes back wrong afterwards — settings reverted, geometry jumping back to where
+it used to be. The reported route in was the settings app's **Launch widget**
+button.
+
+### Why it matters
+
+Nothing else in the project can be trusted while this is true. Every setting the
+user changes is at risk of being reverted by a process they did not know was
+running, and the reversion happens at shutdown, so the damage shows up on the
+*next* launch with nothing connecting it to the cause. It also breaks the
+premise: two identical widgets stacked on one another at the same configured
+coordinates is not furniture, it is a bug wearing the furniture's clothes.
+
+### Cause
+
+Three things, and all three had to go.
+
+**The socket was not a lock.** `ipc.py`'s `start()` called
+`QLocalServer.removeServer(name)` unconditionally before `listen()`, to recover
+from a crash that left the socket file behind. A second widget therefore
+unlinked the first widget's socket and bound its own. Reproduced directly:
+
+```
+first  widget binds : True    second widget binds : True
+first  still listening: True  second listening: True
+settings app landed on: [('second', True)]
+```
+
+Both `start()` calls succeed, and the unseated first widget still reports
+`isListening()` — it has no way to notice it was replaced.
+
+**The Launch button had no guard.** Hiding it was the only protection, and it is
+a state the button did not start in: the settings app's constructor called
+`_on_disconnected()` outright, so the button was *visible* every time the app
+opened and stayed visible until its client connected. With a widget already
+running from autostart, that is a live "Launch widget" button for a connect
+round-trip. Two quick clicks inside `_launch_widget`'s own 400 ms timer did it
+too.
+
+**And then two separate ways for the config to be damaged.** The one that
+actually bit: each widget loads the config at its own startup and writes the
+*whole* thing back on exit and on leaving config mode, so the widget that lost
+the socket never saw any of the user's edits and reverted all of them. The one
+that had not bitten yet: `Config.save` wrote through a deterministic *shared*
+temp name, `config.json.tmp`. `os.replace` is atomic; two writers interleaving
+into one temp file are not.
+
+### What landed
+
+- **`QLockFile` beside the config file** (`config.json.lock`) is the lock, taken
+  in `main()` before the config is read and before a Qt platform plugin or a
+  shell exists. `tryLock(0)` is atomic, so two widgets starting at the same
+  instant cannot both win — which a probe-then-take-over scheme could, and that
+  is the same failure as the original bug. `setStaleLockTime(0)` turns off the
+  thirty-second age test and leaves only the pid test, because a desktop widget
+  is up for weeks and would otherwise have its lock stolen from under it.
+- **The socket is left alone.** `start()` keeps its unconditional
+  `removeServer()`; only the comment changed, from hopeful to true — we hold the
+  lock, so any socket at this name was left by a crash.
+- **The socket is named per config file**, hashed from the resolved path and
+  `normcase`d, so Windows cannot hand out two widgets for `C:\Users\...` and
+  `c:\users\...`.
+- **A refused second widget raises the one already running** and exits 0, having
+  never built a window, spawned a shell, or written the config.
+- **Launch became Launch/Restart**, always visible, disabled while a widget is on
+  its way — which closes the double-click window before the lock is ever
+  consulted. Restart asks the widget to quit with a restart flag and the *widget*
+  starts its own replacement, in `main()`'s `finally`, in the one order that
+  works: socket, then config, then lock, then spawn. It is the only party that
+  knows when it has let go of all three.
+- **`Config.save` writes through `tempfile.mkstemp`** and unlinks on failure.
+
+### Two things this cost, both worth stating
+
+**Config mode now begins at the settings app's first message, not at the bare
+connection.** It had to: a refused second widget connects in order to ask for a
+raise, and under the old rule that connection alone would put the widget into
+config mode and, on disconnect, trigger a config write. The invariant the module
+docstring rests on survives — the *disconnect* is still what ends config mode, so
+a settings app that crashed still looks exactly like one that quit.
+
+**A first attempt at this grew a "visitor" path** so a raise would work even with
+settings connected, and it segfaulted: the timeout timer fired against a socket
+that had already been `deleteLater()`d. It was then deleted rather than repaired,
+because it was solving a problem that does not exist — a connected settings app
+means config mode, and config mode has already called `bring_to_front()`. The
+widget is as visible as the request could have made it.
+
+### What was verified here
+
+From WSL, with real processes and real sockets:
+
+- A second widget on the same config exits 0, and a shell that touches a file
+  when it starts proves it spawned nothing; the first widget survives and the
+  config is untouched.
+- A widget on a deliberately different `--config` still runs, so the escape
+  hatch is intact.
+- `SIGKILL` leaves the lock file behind and the next widget reclaims it.
+- Restart leaves exactly one widget, with the old shell gone and a new one
+  started.
+- 277 tests pass with sockets available. Note the five original socket tests, and
+  the eleven now, *skip* where binding a local socket is forbidden — and a
+  skipped test looks exactly like a passing one, which is why the lock tests were
+  deliberately written to need no socket at all.
+
+Nothing was run on Windows.
+
+### To verify on Windows
+
+- [ ] Launching a second widget from the Start Menu shortcut brings the running
+      one to the front and starts nothing
+- [ ] Autostart plus a manual launch yields exactly one widget
+- [ ] The Launch button reads **Restart widget** while a widget is running, and
+      restarting leaves exactly one widget
+- [ ] No orphaned shell and no stray `conhost.exe` after a restart
+- [ ] `taskkill /F` on the widget leaves the lock behind, and the next launch
+      reclaims it rather than refusing to start
+- [ ] Two widgets on two different `--config` files still both run
+- [ ] A config directory that cannot be written warns and still starts the widget
+- [ ] The settings app finds the widget it was pointed at when both are given
+      `--config`
