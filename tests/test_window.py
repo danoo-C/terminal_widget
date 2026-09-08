@@ -1,7 +1,9 @@
 """Tests for the two modes -- the core of the widget's design."""
 
+import time
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from terminal_widget.config import (
@@ -483,3 +485,135 @@ def test_the_session_survives_a_layer_change(live):
     live.apply_config(replace_stacking(live, STACKING_TOP))
     assert live.session is session
     assert live.view.session is session
+
+
+# -- A shell that fails should be readable ----------------------------
+#
+# The widget's shipped launcher is a gui-script, so it is pythonw-backed and
+# has no console: a traceback or a "command not found" goes nowhere. If the
+# window closes over it too, a broken custom command is undiagnosable -- which
+# is exactly what issues.md issue 2 was reported as ("it completely failed").
+
+
+def screen_text(window):
+    """Everything on the screen, with wraps rejoined.
+
+    Rows are concatenated rather than newline-joined, because a notice long
+    enough to wrap would otherwise be split mid-word and no substring check
+    would find it.
+    """
+    screen = window.session.screen
+    return "".join(
+        "".join(screen.buffer[y][x].data for x in range(screen.columns))
+        for y in range(screen.lines)
+    )
+
+
+def test_a_shell_that_dies_at_once_leaves_the_window_up(live):
+    closed = []
+    live.closed.connect(lambda: closed.append(True))
+    live._started_at = time.monotonic()  # just started
+    live.view.session.stream.feed("zsh:1: command not found: fastfetch\r\n")
+
+    live._on_session_ended()
+
+    assert not closed
+    assert "command not found" in screen_text(live)
+    assert "exited after" in screen_text(live)
+
+
+def test_a_shell_you_typed_exit_into_still_closes_the_widget(live):
+    """The premise: the window shows one shell, and that shell is gone. Only
+    a shell that failed on its own earns a reprieve."""
+    closed = []
+    live.closed.connect(lambda: closed.append(True))
+    live._started_at = time.monotonic()
+    live.view.session.write("exit\r")
+
+    live._on_session_ended()
+
+    assert closed == [True]
+
+
+def test_a_shell_that_ran_for_a_while_still_closes_the_widget(live):
+    closed = []
+    live.closed.connect(lambda: closed.append(True))
+    live._started_at = time.monotonic() - 600  # ten minutes ago
+
+    live._on_session_ended()
+
+    assert closed == [True]
+
+
+def test_a_shell_that_cannot_be_spawned_says_so_on_screen(window, monkeypatch):
+    """A custom command naming a program that is not there raises out of the
+    backend. The window has to survive that and explain itself."""
+    from terminal_widget import session as session_module
+
+    class Missing:
+        def spawn(self, *args, **kwargs):
+            raise FileNotFoundError("no such file: definitely-not-a-shell")
+
+        def terminate(self):
+            pass
+
+    monkeypatch.setattr(session_module, "open_pty", Missing)
+    window.start_session()
+
+    assert window.session is not None
+    assert not window.session.alive
+    assert "could not start the shell" in screen_text(window)
+    assert "definitely-not-a-shell" in screen_text(window)
+
+
+def test_a_failed_spawn_leaves_no_half_open_session(window, monkeypatch):
+    """`_backend` set means "a shell is running". A failed start must not
+    leave it holding a PTY that never got a process."""
+    from terminal_widget import session as session_module
+
+    released = []
+
+    class Missing:
+        def spawn(self, *args, **kwargs):
+            raise FileNotFoundError("nope")
+
+        def terminate(self):
+            released.append(True)
+
+    monkeypatch.setattr(session_module, "open_pty", Missing)
+    window.start_session()
+
+    assert released == [True]
+    assert window.session._backend is None
+
+
+def test_esc_closes_a_window_that_is_being_held_open(live):
+    """Holding the window open takes away the documented way to close a
+    widget where there is no tray -- GNOME without an extension, WSLg --
+    which was exiting its shell. Esc is what gives it back."""
+    live.view.session._alive = False
+    closed = []
+    live.closed.connect(lambda: closed.append(True))
+
+    event = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+    )
+    QApplication.sendEvent(live.view, event)
+
+    assert closed == [True]
+
+
+def test_esc_still_reaches_a_shell_that_is_running(live):
+    """The other half: Esc is a key a terminal has to be able to send."""
+    sent = []
+    live.view.session.write = sent.append
+    closed = []
+    live.closed.connect(lambda: closed.append(True))
+
+    event = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+    )
+    QApplication.sendEvent(live.view, event)
+
+    assert sent == ["\x1b"]
+    assert not closed

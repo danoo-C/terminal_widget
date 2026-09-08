@@ -1,5 +1,7 @@
 """Tests for the wheel-driven viewport over the scrollback."""
 
+import time
+
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
 
@@ -153,3 +155,78 @@ def test_plain_page_up_still_goes_to_the_shell(live, monkeypatch):
     feed(live, *numbers(60))
     key(live.view, Qt.Key.Key_PageUp)
     assert sent == ["\x1b[5~"]
+
+
+# -- Scroll to the top when the shell starts ---------------------------
+
+
+def test_the_startup_scroll_shows_the_first_line_the_shell_printed(live):
+    """A banner taller than the widget should read from its top, not its
+    bottom. At session start history_total is 0, so the top of the scrollback
+    *is* the first line of the startup output."""
+    live._arm_startup_scroll()
+    feed(live, *numbers(60, prefix="banner"))
+    live._startup_scroll_fired()
+    screen = live.view.session.screen
+    assert live.view.scroll_offset() == len(screen.history)
+    assert top_row_text(live.view) == "banner0"
+
+
+def test_the_startup_scroll_gives_way_to_anyone_who_has_started_typing(live):
+    """Firing after the user has begun working would yank the view off the
+    prompt they are typing at."""
+    live._arm_startup_scroll()
+    feed(live, *numbers(60, prefix="banner"))
+    live.view.session.write("l")
+    live._startup_scroll_fired()
+    assert live.view.scroll_offset() == 0
+
+
+def test_the_startup_scroll_disarms_itself_once_it_has_fired(live):
+    live._arm_startup_scroll()
+    feed(live, *numbers(60))
+    live._startup_scroll_fired()
+    assert live._startup_scroll is None
+
+
+def test_the_quiet_period_is_measured_from_the_output_not_the_launch(live):
+    """The regression test for a shell that takes a moment to say anything --
+    which is every cold WSL start. Arming must not start the clock, or the
+    whole quiet period is spent in silence, the timer fires against an empty
+    screen, and the banner that arrives a second later is never scrolled to."""
+    live._arm_startup_scroll()
+    assert not live._startup_scroll.isActive()
+    feed(live, "the first thing the shell said")
+    live.view.session.screenUpdated.emit()
+    assert live._startup_scroll.isActive()
+
+
+def test_the_startup_scroll_gives_up_on_a_shell_that_never_stops_printing(live):
+    """Nothing should scroll to the top minutes into a session because some
+    long-running startup command finally drew breath."""
+    live._arm_startup_scroll()
+    live.view.session.screenUpdated.emit()  # starts the budget
+    live._startup_deadline = time.monotonic() - 1  # as if it had run out
+    live.view.session.screenUpdated.emit()
+    assert live._startup_scroll is None
+    feed(live, *numbers(60))
+    live._startup_scroll_fired()
+    assert live.view.scroll_offset() == 0
+
+
+def test_scrolling_around_during_startup_wins_over_the_banner(live):
+    """The wheel says you are already reading something of your own choosing."""
+    live._arm_startup_scroll()
+    feed(live, *numbers(60, prefix="banner"))
+    live.view.scroll_by(5)
+    before = live.view.scroll_offset()
+    live._startup_scroll_fired()
+    assert live.view.scroll_offset() == before
+
+
+def test_a_banner_that_fits_leaves_the_view_where_it_was(live):
+    """Nothing has scrolled off, so there is nothing to scroll back to."""
+    live._arm_startup_scroll()
+    feed(live, "just one line")
+    live._startup_scroll_fired()
+    assert live.view.scroll_offset() == 0

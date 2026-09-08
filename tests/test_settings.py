@@ -114,3 +114,17 @@ def test_changing_the_layer_reaches_the_widget(settings):
         settings.combo_stacking.findData(STACKING_TOP)
     )
     assert sent and sent[-1].stacking == STACKING_TOP
+
+
+def test_the_scroll_to_top_checkbox_round_trips(settings):
+    settings._config = Config(scroll_top_on_start=True)
+    settings._load_into_ui()
+    assert settings.check_scroll_top.isChecked()
+    assert settings._config_from_ui().scroll_top_on_start is True
+
+
+def test_ticking_scroll_to_top_reaches_the_widget(settings):
+    sent = []
+    settings.client.send_config = sent.append
+    settings.check_scroll_top.setChecked(True)
+    assert sent and sent[-1].scroll_top_on_start is True

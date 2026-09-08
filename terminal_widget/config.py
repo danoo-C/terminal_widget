@@ -110,6 +110,11 @@ class Config:
     # -- Scrollback, in lines. 0 turns it off.
     scrollback: int = 5000
 
+    #: Where the viewport sits once the shell has finished starting up. Off by
+    #: default: it only earns its keep when the startup output is taller than
+    #: the widget, which is a thing you opt into by printing a banner.
+    scroll_top_on_start: bool = False
+
     # -- Where the widget sits in the window stack. "desktop" keeps it below
     #    normal windows, which is what makes it furniture rather than an app.
     stacking: str = STACKING_DESKTOP
@@ -244,15 +249,105 @@ def working_dir_for(cfg: Config) -> str | None:
     return None
 
 
+def split_windows_command_line(line: str) -> list[str]:
+    """Split a Windows command line the way ``CommandLineToArgvW`` does.
+
+    Not the same thing as :mod:`shlex`. Backslashes are ordinary path
+    separators unless they precede a quote, and the quotes themselves are
+    syntax rather than part of the argument -- which is exactly what
+    ``shlex.split(posix=False)`` gets wrong, since it leaves them in the
+    token for something further down to parse a second time. See issues.md,
+    issue 2: nothing further down does.
+    """
+    argv: list[str] = []
+    i, n = 0, len(line)
+
+    # argv[0] plays by different rules: quotes delimit it, and backslashes
+    # inside it are always literal, because it is a path.
+    while i < n and line[i] in " \t":
+        i += 1
+    if i < n:
+        first: list[str] = []
+        if line[i] == '"':
+            i += 1
+            while i < n and line[i] != '"':
+                first.append(line[i])
+                i += 1
+            i += 1
+        else:
+            while i < n and line[i] not in " \t":
+                first.append(line[i])
+                i += 1
+        argv.append("".join(first))
+
+    cur: list[str] = []
+    in_quotes = started = False
+    while i < n:
+        ch = line[i]
+        if ch == "\\":
+            slashes = 0
+            while i < n and line[i] == "\\":
+                slashes += 1
+                i += 1
+            if i < n and line[i] == '"':
+                # 2n backslashes then a quote: n backslashes, quote is syntax.
+                # 2n+1: n backslashes, and the quote is a literal character.
+                cur.append("\\" * (slashes // 2))
+                if slashes % 2:
+                    cur.append('"')
+                    i += 1
+                elif in_quotes and i + 1 < n and line[i + 1] == '"':
+                    cur.append('"')
+                    i += 2
+                else:
+                    in_quotes = not in_quotes
+                    i += 1
+                started = True
+            else:
+                cur.append("\\" * slashes)
+                started = started or bool(slashes)
+            continue
+        if ch == '"':
+            if in_quotes and i + 1 < n and line[i + 1] == '"':
+                cur.append('"')  # "" inside quotes is one literal quote
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+            started = True
+            continue
+        if ch in " \t" and not in_quotes:
+            if started:
+                argv.append("".join(cur))
+                cur, started = [], False
+            i += 1
+            continue
+        cur.append(ch)
+        started = True
+        i += 1
+    if started:
+        argv.append("".join(cur))
+    return argv
+
+
 def resolve_shell(cfg: Config) -> list[str]:
     """Turn the configured shell into an argv list to spawn."""
     if cfg.shell == "custom" and cfg.custom_command.strip():
-        import shlex
-
         if sys.platform == "win32":
-            # Windows command lines don't follow POSIX quoting; pass through.
-            return [cfg.custom_command.strip()]
-        return shlex.split(cfg.custom_command)
+            # Parsed with Windows rules rather than POSIX ones, and parsed
+            # *here*, so that nothing downstream has to guess whether it is
+            # looking at a command line or at an argv.
+            argv = split_windows_command_line(cfg.custom_command.strip())
+            if argv and argv[0]:
+                return argv
+            # A lone quote parses to a program with no name. Fall through to
+            # the default shell rather than spawn that -- deliberately the
+            # only such fallback, because a command that is merely wrong
+            # should reach the shell and be reported, not be replaced.
+        else:
+            import shlex
+
+            return shlex.split(cfg.custom_command)
 
     presets = _WINDOWS_SHELLS if sys.platform == "win32" else _POSIX_SHELLS
     for key, _label, argv in presets:

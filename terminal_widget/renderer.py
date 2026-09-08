@@ -554,6 +554,10 @@ class TerminalView(QWidget):
             return
 
         if self.session is None or not self.session.alive:
+            # Unaccepted, so it reaches the window: Qt only propagates a key
+            # event to the parent if the child leaves it alone, and a window
+            # held open after a failed shell listens for Esc.
+            event.ignore()
             return
         app_cursor = DECCKM in self.session.screen.mode
         data = sequence_for(event, app_cursor)

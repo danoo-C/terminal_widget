@@ -54,6 +54,22 @@ class PosixPty(PtyBackend):
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.isalive()
 
+    @property
+    def exit_status(self) -> int | None:
+        proc = self._proc
+        if proc is None:
+            return None
+        try:
+            # ptyprocess sets exitstatus inside isalive(), as it reaps the
+            # child; asking without that call finds it still None after the
+            # exit. PtyProcessError is not an OSError, and this runs in a Qt
+            # slot, so the guard is deliberately broad: a status we cannot
+            # read is a missing detail, never a reason to take the widget down.
+            proc.isalive()
+            return proc.exitstatus
+        except Exception:
+            return None
+
     def terminate(self) -> None:
         if self._proc is not None:
             try:

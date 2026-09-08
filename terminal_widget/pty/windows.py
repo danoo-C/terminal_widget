@@ -28,12 +28,13 @@ class WindowsPty(PtyBackend):
         from winpty import PtyProcess  # type: ignore[import-not-found]
 
         env = env or dict(os.environ)
-        # pywinpty takes a command line, not an argv list. Anything needing
-        # quoting should come through config as a "custom" command already
-        # shaped the way Windows expects.
-        command = argv[0] if len(argv) == 1 else " ".join(argv)
+        # A list, never a joined string. Given a str, pywinpty re-splits it
+        # with shlex, which keeps the quote characters inside the tokens, and
+        # then hands them to list2cmdline, which escapes them into the child's
+        # argv as literal quotes. Given a list it skips shlex entirely, and
+        # list2cmdline is the exact inverse of the parser config.py used.
         self._proc = PtyProcess.spawn(
-            command, cwd=cwd, dimensions=(rows, cols), env=env
+            list(argv), cwd=cwd, dimensions=(rows, cols), env=env
         )
 
     def read(self, size: int = 4096) -> str:
@@ -65,6 +66,17 @@ class WindowsPty(PtyBackend):
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.isalive()
+
+    @property
+    def exit_status(self) -> int | None:
+        if self._proc is None:
+            return None
+        try:
+            # Unlike ptyprocess, pywinpty reads this straight off the PTY
+            # rather than caching it in isalive(), so it needs no reap first.
+            return self._proc.exitstatus
+        except Exception:
+            return None  # WinptyError is not an OSError, and this is a Qt slot
 
     def terminate(self) -> None:
         if self._proc is not None:
