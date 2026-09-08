@@ -4,6 +4,9 @@ from pathlib import Path
 from terminal_widget.config import (
     OPACITY_BACKGROUND,
     OPACITY_WINDOW,
+    STACKING_CHOICES,
+    STACKING_DESKTOP,
+    STACKING_TOP,
     Config,
     resolve_shell,
     working_dir_for,
@@ -173,3 +176,36 @@ def test_clamped_does_not_touch_the_filesystem_for_working_dir():
     assert Config(working_dir="/nowhere/at/all").clamped().working_dir == (
         "/nowhere/at/all"
     )
+
+
+# -- Window layer -----------------------------------------------------
+
+
+def test_the_default_layer_is_behind_other_windows():
+    """The premise of the thing: furniture, not an application."""
+    assert Config().stacking == STACKING_DESKTOP
+
+
+def test_an_unknown_layer_falls_back_to_the_desktop():
+    assert Config(stacking="sideways").clamped().stacking == STACKING_DESKTOP
+
+
+def test_every_offered_layer_survives_clamping():
+    """A layer the dropdown can offer but clamped() throws away would look
+    like the setting simply not working."""
+    for key, _label in STACKING_CHOICES:
+        assert Config(stacking=key).clamped().stacking == key
+
+
+def test_the_layer_round_trips_through_the_file(tmp_path):
+    path = tmp_path / "config.json"
+    Config(stacking=STACKING_TOP).save(path)
+    assert Config.load(path).stacking == STACKING_TOP
+
+
+def test_a_config_written_before_the_setting_existed_takes_the_default(tmp_path):
+    """Existing installs move to the desktop layer on upgrade. That is a
+    deliberate behaviour change, so it is stated here rather than discovered."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"x": 5, "y": 6}))
+    assert Config.load(path).stacking == STACKING_DESKTOP

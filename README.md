@@ -11,7 +11,7 @@ Runs on **Linux** and **Windows**.
 
 > **Status: installable and working on Linux.** One command installs
 > everything -- a private environment, launcher entries, optional autostart,
-> and an uninstaller. The widget and settings app both work, and 98 tests
+> and an uninstaller. The widget and settings app both work, and 230 tests
 > cover them. **Not yet verified on Windows:** the code is there and the paths
 > are right, but it has never been run.
 
@@ -27,7 +27,12 @@ you launch and more like a panel that happens to be a terminal.
 That means:
 
 - **No decorations.** No title bar, no borders, no close/minimize buttons.
-- **Stays put.** Fixed position and size, remembered between sessions.
+- **Not an application.** No taskbar button, no Alt+Tab slot. Alt+Tab is the
+  literal act of switching to an application, and a desktop widget should never
+  ask for that attention. It is a tool window; the tray icon and the settings
+  app are how you reach it.
+- **Stays put.** Fixed position and size, remembered between sessions — and, by
+  default, behind your other windows, the way a Rainmeter skin is.
 - **One shell, no tabs.** If you want tabs, you want a different program.
 - **Configured elsewhere.** Everything tunable lives in the settings app.
 
@@ -62,6 +67,10 @@ The widget becomes a window you can arrange:
   session. (Changing the shell program is the one exception — see below.)
 - **Visibly distinct.** The widget shows an outline or similar affordance while in
   config mode, so it is never ambiguous which mode you are in.
+- **Lifted into view.** Whatever layer the widget normally lives in, opening
+  settings puts it in the normal window order and brings it forward, so you are
+  never arranging something you cannot see. Its configured layer comes back the
+  moment you close settings.
 
 **Trade-off, stated plainly:** because click-and-drag anywhere moves the window,
 you cannot select text with the mouse while config mode is active. Config mode is
@@ -90,6 +99,8 @@ else. It is a terminal without a title bar, not a picture of a terminal.
 | Keyboard input to shell | yes | yes |
 | Mouse text selection | no (drag moves window) | yes |
 | Mouse wheel scrollback | no (window owns the mouse) | yes |
+| Window layer | lifted to the normal order | as configured |
+| Taskbar button / Alt+Tab | no | no |
 | Shell session | continues | continues |
 
 ---
@@ -164,6 +175,31 @@ unclickable everywhere except exactly on a letter.
 Font family, font size, and color scheme also live here.
 
 ### Behaviour
+
+| Setting | Type | Notes |
+| --- | --- | --- |
+| Window layer | choice | Behind other windows (default), the normal order, or always on top. |
+
+**Behind other windows** is what makes the widget part of the desktop rather
+than something in front of it: anything you open covers it, and you get it back
+by clearing the desktop — exactly the bargain a Rainmeter skin makes. **Always
+on top** is the opposite trade, for a widget you want in view while you work.
+**The normal window order** puts it in the ordinary stack, where clicking brings
+it forward.
+
+None of the three gives the widget a taskbar button or an Alt+Tab slot, so the
+tray icon and this settings app are how you reach it in every case.
+
+The setting applies when you *close* settings, not while you are editing it.
+Config mode lifts the widget into the normal order for as long as settings is
+open — previewing "behind everything" would bury the thing you are trying to
+drag, and previewing "always on top" would float it over the fields you are
+typing into.
+
+One platform difference worth knowing: on Windows the below-layer is a single
+`SetWindowPos(HWND_BOTTOM)` applied when the window is created, because Windows
+has no persistent stay-below state. Clicking the widget brings it forward until
+you click elsewhere. On X11 the WM holds `_NET_WM_STATE_BELOW`, so it stays put.
 
 | Setting | Type | Notes |
 | --- | --- | --- |
@@ -361,6 +397,26 @@ reconfigure it. The settings app can also launch the widget itself, and if you
 open settings with no widget running it still edits the config file for next
 time.
 
+### The tray icon
+
+Because the widget has no taskbar button, no Alt+Tab entry and no close button,
+the tray icon is how you reach it:
+
+| Entry | Does |
+| --- | --- |
+| **Show** | Brings the widget to the front and focuses it, from any layer and from minimised. |
+| **Settings** | Opens the settings app — or just raises the widget, if one is already open. |
+| **Quit** | Closes the widget, shutting its shell down on the way. |
+
+Left-clicking the icon does **Show**. There is no switch to turn the tray icon
+off: it is the only way back to a covered widget and the only way to quit one
+that has no close button, which is the same reason whole-window opacity stops
+at 10% rather than 0.
+
+Where there is no tray at all — GNOME without an extension, and WSLg — the
+widget says so on stderr and runs anyway. The settings app is then the way to
+reach it, and exiting its shell is the way to close it.
+
 ## Developing
 
 ```bash
@@ -393,6 +449,7 @@ terminal_widget/
 │   ├── config.py          # load / save / defaults / shells
 │   ├── platform_info.py   # platform facts, stdlib only
 │   ├── ipc.py             # local socket to the settings app
+│   ├── tray.py            # tray icon: the way back to a covered widget
 │   ├── pty/               # ptyprocess (Linux) / pywinpty (Windows)
 │   ├── autostart/         # XDG entry (Linux) / Run key (Windows)
 │   ├── assets/            # application icon
@@ -416,9 +473,16 @@ Things that will need deciding or discovering as the code gets written:
 - **Wayland.** Setting a window's absolute position is not permitted under
   Wayland, which is a direct problem for a widget whose whole point is living at
   fixed coordinates. May need an X11-only path plus a documented limitation.
-- **Window stacking.** Whether the widget sits below normal windows (true desktop
-  widget), above them, or in the normal stack. Pinning to the desktop layer has no
-  supported API on Windows.
+- **Window stacking.** *Decided:* the user picks, and the default is below normal
+  windows. Not pinned to the desktop layer proper — that means parenting to the
+  `WorkerW` window behind the desktop icons on Windows, which has no supported
+  API and has to be redone every time Explorer restarts. So the widget is
+  *below other windows*, not *behind the desktop icons*. What is still open is
+  how well the below-layer holds on Windows, where it is applied once at window
+  creation rather than kept by the shell.
+- **Show desktop.** Win+D minimises windows; Rainmeter survives it by living on
+  the desktop layer, and a tool window may not. Unverified. The tray icon's
+  **Show** is the recovery either way.
 - **Resize granularity.** Free-pixel resizing leaves partial character cells at
   the edges; snapping to whole cells fights the OS resize handles. Needs a call.
 - **Frame vs client coordinates.** Some window managers put a frame around a

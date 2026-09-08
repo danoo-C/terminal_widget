@@ -48,6 +48,8 @@ from .. import autostart
 from ..config import (
     OPACITY_BACKGROUND,
     OPACITY_WINDOW,
+    STACKING_CHOICES,
+    STACKING_DESKTOP,
     Config,
     available_shells,
     config_dir,
@@ -320,6 +322,23 @@ class SettingsWindow(QWidget):
         box = QGroupBox("Behaviour")
         form = QFormLayout(box)
 
+        self.combo_stacking = QComboBox()
+        for key, label in STACKING_CHOICES:
+            self.combo_stacking.addItem(label, key)
+        self.combo_stacking.currentIndexChanged.connect(self._on_ui_changed)
+        form.addRow("Window layer", self.combo_stacking)
+        form.addRow(
+            "",
+            self._hint(
+                "Behind other windows is what makes it part of the desktop. "
+                "It takes no taskbar button and no Alt+Tab slot either way, so "
+                "the tray icon and this app are how you reach it. Applied when "
+                "you close settings -- while settings is open the widget is "
+                "lifted into the normal order so you can see what you are "
+                "arranging."
+            ),
+        )
+
         self.spin_scrollback = QSpinBox(minimum=0, maximum=50000, singleStep=500)
         self.spin_scrollback.setSuffix(" lines")
         self.spin_scrollback.setSpecialValueText("Off")
@@ -468,6 +487,11 @@ class SettingsWindow(QWidget):
         self.spin_font.setValue(c.font_size)
         self.check_history.setChecked(c.separate_history)
         self.spin_scrollback.setValue(c.scrollback)
+        # Index 0 is the desktop layer, which is deliberately also what
+        # clamped() falls back to: a layer written by a newer version shows as
+        # the value it is actually going to become.
+        index = self.combo_stacking.findData(c.stacking)
+        self.combo_stacking.setCurrentIndex(index if index >= 0 else 0)
         self._updating = False
         self._refresh_derived()
 
@@ -495,6 +519,7 @@ class SettingsWindow(QWidget):
             font_family=self.combo_font.currentFont().family(),
             font_size=self.spin_font.value(),
             scrollback=self.spin_scrollback.value(),
+            stacking=self.combo_stacking.currentData() or STACKING_DESKTOP,
         )
 
     def _on_ui_changed(self, *_args) -> None:

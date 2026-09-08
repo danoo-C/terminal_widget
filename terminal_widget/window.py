@@ -16,6 +16,9 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from .config import (
     MIN_OPACITY_WINDOW,
     OPACITY_BACKGROUND,
+    STACKING_DESKTOP,
+    STACKING_NORMAL,
+    STACKING_TOP,
     Config,
     environment_for,
     resolve_shell,
@@ -27,6 +30,20 @@ from .session import TerminalSession
 
 #: How close to an edge a press counts as "resize" rather than "move".
 RESIZE_MARGIN = 7
+
+#: What the widget *is*, before any stacking hint. ``Qt::Tool`` rather than
+#: ``Qt::Window`` is what keeps the shell from giving it a taskbar button and
+#: an Alt+Tab slot: a widget you can switch to is not part of the desktop.
+BASE_FLAGS = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+
+_NO_HINT = Qt.WindowType(0)
+
+#: Config value -> the flag that puts the window in that layer.
+_STACKING_HINTS: dict[str, Qt.WindowType] = {
+    STACKING_DESKTOP: Qt.WindowType.WindowStaysOnBottomHint,
+    STACKING_NORMAL: _NO_HINT,
+    STACKING_TOP: Qt.WindowType.WindowStaysOnTopHint,
+}
 
 _EDGE_CURSORS = {
     Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor,
@@ -71,18 +88,30 @@ class WidgetWindow(QWidget):
     #: settings app's geometry fields can follow along live.
     geometryEdited = Signal(int, int, int, int)
 
+    #: Emitted once the window has closed and its session is torn down.
+    #:
+    #: Qt clears ``WA_QuitOnClose`` for every window type outside
+    #: Widget/Window/Dialog, so a ``Qt::Tool`` window closing does *not* end
+    #: ``app.exec()`` -- and setting the attribute back does not stick, because
+    #: Qt re-clears it on every flags change. Without this signal the widget
+    #: would vanish when its shell exited and leave a headless process behind.
+    closed = Signal()
+
     def __init__(self, config: Config) -> None:
         super().__init__(None)
         self._config = config
         self._config_mode = False
         self._drag_origin = None
         self._translucent = False
+        self._restacking = False
 
         self.setWindowTitle(DISPLAY_NAME)
         icon = icon_path()
         if icon.exists():
             self.setWindowIcon(QIcon(str(icon)))
-        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        # Set before the window is ever shown, so launching in any layer
+        # creates exactly one native window and never needs a restack.
+        self.setWindowFlags(self._window_flags())
         self.setMouseTracking(True)
 
         self.view = TerminalView(config, self)
@@ -126,15 +155,100 @@ class WidgetWindow(QWidget):
         """Switch between config and locked mode."""
         if enabled == self._config_mode:
             return
+        # Assigned before the restack: _stacking_hint() reads it.
         self._config_mode = enabled
+        self._restack()
         self.view.set_config_mode(enabled)
-        self._overlay.setGeometry(self.rect())
+        self._sync_overlay()
         self._overlay.setVisible(enabled)
-        self._overlay.raise_()
-        if not enabled:
+        if enabled:
+            # Arranging the widget starts with being able to see it, and from
+            # the desktop layer -- or from under whatever else is open -- you
+            # cannot. The restack alone does not do this: it is a no-op when
+            # the configured layer is already the normal one.
+            self.bring_to_front()
+        else:
             self.unsetCursor()
             self._drag_origin = None
         self.update()
+
+    # -- Stacking ----------------------------------------------------
+
+    def _stacking_hint(self) -> Qt.WindowType:
+        """The stacking flag that should be in effect right now.
+
+        Config mode overrides the setting. You cannot arrange a widget that is
+        underneath the settings app, so it joins the normal window order for
+        as long as settings is open and drops back the moment it closes.
+        """
+        if self._config_mode:
+            return _NO_HINT
+        return _STACKING_HINTS.get(
+            self._config.stacking, Qt.WindowType.WindowStaysOnBottomHint
+        )
+
+    def _window_flags(self) -> Qt.WindowType:
+        return BASE_FLAGS | self._stacking_hint()
+
+    def _restack(self) -> None:
+        """Re-apply the window flags, putting back what a flags change drops.
+
+        Qt routes a flags change through ``setParent()``, which hides the
+        window and, on Windows, destroys and recreates the native one. Anything
+        the *platform* window owns -- placement, translucency, opacity -- has
+        to be re-asserted afterwards. Anything Qt owns survives on its own: the
+        child widgets, the overlay, and the session, whose PTY lives on a
+        QThread rather than on the native window and never notices.
+
+        One ``setWindowFlags`` rather than two ``setWindowFlag`` calls, because
+        going from one layer to another clears one hint and sets another, and
+        each call would cost its own hide-and-recreate cycle.
+        """
+        wanted = self._window_flags()
+        if wanted == self.windowFlags():
+            return
+        was_visible = self.isVisible()
+        # Client coordinates, for the reason _emit_geometry documents at
+        # length: pos() would be the frame position and would drift.
+        geom = self.geometry()
+        self._restacking = True
+        try:
+            self.setWindowFlags(wanted)
+            if was_visible:
+                self.setGeometry(geom)
+                # Re-showing must not steal focus from whatever the user is
+                # actually working in; the widget is furniture.
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                self.show()
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+                # Again: a window manager has its say about placement once the
+                # window is mapped, not before.
+                self.setGeometry(geom)
+                self._apply_window_opacity()
+                self._sync_overlay()
+                self.view.setFocus()
+        finally:
+            self._restacking = False
+
+    def bring_to_front(self) -> None:
+        """Make the widget visible and focused, whatever layer it lives in.
+
+        The only way back to a window with no taskbar button and no Alt+Tab
+        slot, so it has to work from the desktop layer and from minimised.
+        ``raise_()`` is a deliberate no-op on Windows while the bottom hint is
+        set -- Qt's platform plugin refuses it -- so ``activateWindow()`` is
+        the half that does the work there.
+        """
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.view.setFocus()
+
+    def _sync_overlay(self) -> None:
+        """Keep the config affordance the size of the window, and on top."""
+        self._overlay.setGeometry(self.rect())
+        self._overlay.raise_()
 
     @property
     def config_mode(self) -> bool:
@@ -168,6 +282,16 @@ class WidgetWindow(QWidget):
             self._apply_window_opacity()
         if config.scrollback != previous.scrollback and self.session is not None:
             self.session.set_scrollback(config.scrollback)
+        if config.stacking != previous.stacking:
+            # Before the geometry block, so the restack's own geometry restore
+            # cannot land on top of the size we were actually asked for.
+            #
+            # Deliberately deferred while the settings app is open: the setting
+            # says where the widget sits when you are *not* arranging it, and
+            # _stacking_hint() holds the normal order for as long as config
+            # mode lasts, so this is a no-op until settings goes away. Same
+            # bargain the shell and working-directory fields already make.
+            self._restack()
 
         geom = self.geometry()
         if target != (geom.x(), geom.y(), geom.width(), geom.height()):
@@ -197,8 +321,7 @@ class WidgetWindow(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._overlay.setGeometry(self.rect())
-        self._overlay.raise_()
+        self._sync_overlay()
         self._emit_geometry()
 
     def moveEvent(self, event) -> None:  # noqa: N802
@@ -220,8 +343,15 @@ class WidgetWindow(QWidget):
         2. Window managers move windows for their own reasons. In locked
            mode the user cannot move anything, so any change is the WM's
            and must not be written back as if it were intent.
+        3. A stacking change hides and re-shows the window, and a window
+           manager gets to place it again on the way back. That is the same
+           trap as (2) but in config mode, where the guard above does not
+           apply -- hence ``_restacking``.
+
+        The guard belongs here and not in ``resizeEvent``/``moveEvent``: those
+        also re-sync the overlay, which has to keep happening throughout.
         """
-        if not self._config_mode:
+        if self._restacking or not self._config_mode:
             return
         geom = self.geometry()
         self._config.x, self._config.y = geom.x(), geom.y()
@@ -285,3 +415,6 @@ class WidgetWindow(QWidget):
             self.session.stop()
             self.session = None
         super().closeEvent(event)
+        # Only after the session is down: whoever is listening quits the
+        # application, and the shell must already be gone by then.
+        self.closed.emit()

@@ -776,12 +776,27 @@ Ranked by how much they could hurt.
    widgets. The IPC server already fails to listen when the socket is taken —
    use that as the guard: if `start()` fails because the socket is in use,
    exit rather than running a second, unreachable widget.
-4. **Window stacking.** Should the widget sit below normal windows (a true
+4. **Window stacking.** ~~Should the widget sit below normal windows (a true
    desktop widget), above them, or in the normal stack? Pinning to the desktop
-   layer has no supported API on Windows. Currently unaddressed.
+   layer has no supported API on Windows. Currently unaddressed.~~
+   *Answered in pass 4:* the user chooses — a `stacking` setting with three
+   values, defaulting to `desktop` (`Qt::WindowStaysOnBottomHint`). What made
+   this load-bearing was the window type: it is a `Qt::Tool` now, so it takes no
+   taskbar button and no Alt+Tab slot, and a covered widget would otherwise have
+   had no way back. A tray icon and the settings app are the two ways back, and
+   config mode lifts the widget into the normal order for as long as settings is
+   open. Not `WorkerW` reparenting — no supported API, and it has to be redone
+   every time Explorer restarts — so the widget is below other windows rather
+   than behind the desktop icons. Still open underneath it: on Windows the
+   below-hint is applied once when the native window is created rather than held
+   by the shell, so clicking the widget raises it until you click elsewhere; and
+   Win+D still likely minimises a tool window.
 5. **Shell exit.** The widget closes when the shell exits. For something meant
    to live on the desktop permanently, respawning may be better. Make it a
-   setting or make a deliberate choice.
+   setting or make a deliberate choice. *Note from pass 4:* `Qt::Tool` clears
+   `WA_QuitOnClose`, so this is now explicit wiring (`WidgetWindow.closed` →
+   `app.quit`) rather than a Qt default — which makes respawning instead a
+   smaller change than it was.
 6. **Scrollback.** ~~There is none, and no chrome to put a scrollbar in.~~
    *Answered in pass 3:* the wheel scrolls, with no scrollbar and no chrome, plus
    Shift+PageUp/Home for the keyboard. Not `pyte.HistoryScreen` -- it wraps every
