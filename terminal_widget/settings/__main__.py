@@ -352,6 +352,23 @@ class SettingsWindow(QWidget):
             ),
         )
 
+        self.check_scroll_top = QCheckBox("Scroll to the top when the shell starts")
+        self.check_scroll_top.setToolTip(
+            "Once the startup output stops arriving, jump to its first line, "
+            "so a banner taller than the widget reads from the top. The first "
+            "key you press returns you to the prompt."
+        )
+        self.check_scroll_top.toggled.connect(self._on_ui_changed)
+        form.addRow("On start", self.check_scroll_top)
+        form.addRow(
+            "",
+            self._hint(
+                "For a shell that greets you with something worth looking at. "
+                "It needs scrollback to have somewhere to scroll back to, so "
+                "with scrollback off it does nothing."
+            ),
+        )
+
         self.check_history = QCheckBox("Keep shell history separate")
         self.check_history.setToolTip(
             "Commands typed in the widget go to its own history file instead "
@@ -487,6 +504,7 @@ class SettingsWindow(QWidget):
         self.spin_font.setValue(c.font_size)
         self.check_history.setChecked(c.separate_history)
         self.spin_scrollback.setValue(c.scrollback)
+        self.check_scroll_top.setChecked(c.scroll_top_on_start)
         # Index 0 is the desktop layer, which is deliberately also what
         # clamped() falls back to: a layer written by a newer version shows as
         # the value it is actually going to become.
@@ -519,6 +537,7 @@ class SettingsWindow(QWidget):
             font_family=self.combo_font.currentFont().family(),
             font_size=self.spin_font.value(),
             scrollback=self.spin_scrollback.value(),
+            scroll_top_on_start=self.check_scroll_top.isChecked(),
             stacking=self.combo_stacking.currentData() or STACKING_DESKTOP,
         )
 

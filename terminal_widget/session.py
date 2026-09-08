@@ -70,6 +70,7 @@ class TerminalSession(QObject):
         self._backend: PtyBackend | None = None
         self._reader: _ReaderThread | None = None
         self._alive = False
+        self._had_input = False
 
     @property
     def cols(self) -> int:
@@ -83,15 +84,40 @@ class TerminalSession(QObject):
     def alive(self) -> bool:
         return self._alive
 
+    @property
+    def had_input(self) -> bool:
+        """Whether the user has ever sent anything to this shell.
+
+        Only typing and pasting reach :meth:`write`, so this distinguishes a
+        shell that died on its own from one the user closed.
+        """
+        return self._had_input
+
+    @property
+    def exit_status(self) -> int | None:
+        """The shell's exit status, if the backend can still tell us."""
+        return self._backend.exit_status if self._backend is not None else None
+
     def start(
         self,
         argv: list[str],
         env: dict[str, str] | None = None,
         cwd: str | None = None,
     ) -> None:
-        """Spawn ``argv`` and begin pumping its output into the screen."""
-        self._backend = open_pty()
-        self._backend.spawn(argv, self.cols, self.rows, env, cwd)
+        """Spawn ``argv`` and begin pumping its output into the screen.
+
+        Raises whatever the backend raises if the shell cannot be started.
+        ``_backend`` is only bound on success, so a failed start leaves the
+        session in the same state it was in before -- the caller is free to
+        report the failure and leave the window up.
+        """
+        backend = open_pty()
+        try:
+            backend.spawn(argv, self.cols, self.rows, env, cwd)
+        except Exception:
+            backend.terminate()  # release the PTY we opened above
+            raise
+        self._backend = backend
         self._alive = True
 
         self._reader = _ReaderThread(self._backend, self)
@@ -109,6 +135,7 @@ class TerminalSession(QObject):
         self.ended.emit()
 
     def write(self, data: str) -> None:
+        self._had_input = True
         if self._backend is not None:
             self._backend.write(data)
 

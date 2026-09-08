@@ -11,7 +11,7 @@ Runs on **Linux** and **Windows**.
 
 > **Status: installable and working on Linux.** One command installs
 > everything -- a private environment, launcher entries, optional autostart,
-> and an uninstaller. The widget and settings app both work, and 230 tests
+> and an uninstaller. The widget and settings app both work, and 258 tests
 > cover them. **Not yet verified on Windows:** the code is there and the paths
 > are right, but it has never been run.
 
@@ -140,6 +140,14 @@ The dropdown offers what actually exists on the current platform:
 - **Windows:** Command Prompt (`cmd.exe`), PowerShell, WSL, Custom
 - **Linux:** Bash, Zsh, Fish, the login shell from `$SHELL`, Custom
 
+**Custom command** is parsed by the rules of the platform it runs on, so a quoted
+argument survives to the program that needs it: `CommandLineToArgvW` semantics on
+Windows, where backslashes are path separators and `"..."` groups a word, and
+shell-like quoting on Linux. `wsl -d kali-linux -- zsh -c "fastfetch; exec zsh"`
+therefore reaches zsh as one `-c` script rather than as a command named
+`"fastfetch; exec zsh"` — see `issues.md`, issue 2, for the version that did the
+latter.
+
 The shell and the directory it starts in are both read when the widget launches,
 so changing either takes effect the next time it starts rather than restarting the
 running session under you. **Start in** accepts `~` and environment variables; a
@@ -211,6 +219,19 @@ end; typing anything returns to the bottom. Output arriving while you are scroll
 up does not drag the view down with it. Full-screen programs — `vim`, `less`,
 `htop` — do not feed the scrollback, so what is in it is the session you actually
 had rather than a flipbook of redraws.
+
+| Setting | Type | Notes |
+| --- | --- | --- |
+| Scroll to the top when the shell starts | on/off | Off by default. |
+
+For a shell that greets you with something worth looking at. A `fastfetch` banner
+is usually taller than the widget, so what you would otherwise see is its last few
+lines. With this on, the widget waits for the startup output to stop arriving and
+then jumps to its first line; the first key you press returns you to the prompt, so
+it costs nothing the moment you actually want to type. It needs scrollback to have
+somewhere to scroll back to — with scrollback off, or a banner that already fits, it
+does nothing. A shell that is still printing five seconds in is left alone rather
+than yanked to the top later.
 
 | Setting | Type | Notes |
 | --- | --- | --- |
@@ -415,7 +436,9 @@ at 10% rather than 0.
 
 Where there is no tray at all — GNOME without an extension, and WSLg — the
 widget says so on stderr and runs anyway. The settings app is then the way to
-reach it, and exiting its shell is the way to close it.
+reach it, and exiting its shell is the way to close it. The one case where that
+is not available is a widget held open after a shell that failed to start, which
+never had a shell to exit: **Esc** closes that one.
 
 ## Developing
 
@@ -495,8 +518,11 @@ Things that will need deciding or discovering as the code gets written:
   lines keep the width they had, so widening the widget and scrolling up shows the
   old wrapping. Growing the window also does not pull lines back out of the
   scrollback the way xterm does; both would mean reimplementing `resize`.
-- **Shell exit.** The widget currently closes when the shell exits. Respawning
-  or showing a message may suit a permanent desktop widget better.
+- **Shell exit.** The widget closes when the shell exits, which is the premise:
+  it is a window that shows one shell. The exception is a shell that dies within a
+  second and was never typed into — that did not run, it failed, so the window stays
+  up with what it printed, says so, and takes Esc to close. Respawning may still
+  suit a permanent desktop widget better.
 - **Windows.** Nothing has ever been run on Windows -- not the ConPTY backend,
   not the installer, not the Start Menu shortcuts or the Run-key autostart.
 

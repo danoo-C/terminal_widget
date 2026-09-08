@@ -43,6 +43,16 @@ class PtyBackend(ABC):
     def is_alive(self) -> bool:
         """Whether the shell process is still running."""
 
+    @property
+    @abstractmethod
+    def exit_status(self) -> int | None:
+        """The shell's exit status, or None if it is unknown.
+
+        Best effort, and only ever used to explain a shell that died. Both
+        libraries underneath fill this in as a side effect of reaping the
+        child, so it can legitimately be None right after the PTY closes.
+        """
+
     @abstractmethod
     def terminate(self) -> None:
         """Stop the shell, forcefully if it does not exit on its own."""

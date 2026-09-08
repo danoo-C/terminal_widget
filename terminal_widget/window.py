@@ -9,7 +9,9 @@ connection state. This module only implements the two behaviours.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+import time
+
+from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
@@ -37,6 +39,20 @@ RESIZE_MARGIN = 7
 BASE_FLAGS = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
 
 _NO_HINT = Qt.WindowType(0)
+
+#: How long the shell's output has to go quiet before "scroll to the top"
+#: decides the startup command has finished printing. A PTY has no signal for
+#: that, so a gap in the output stands in for one.
+STARTUP_QUIET_MS = 400
+
+#: And how long we go on waiting for that gap. A shell still printing after
+#: this was never going to have an opening worth reading, and yanking the view
+#: to the top of it minutes later would be a surprise rather than a feature.
+STARTUP_SCROLL_TIMEOUT_S = 5.0
+
+#: Under this, a shell that exits did not run: it failed. The window stays up
+#: so whatever it printed can be read, instead of closing over the evidence.
+INSTANT_EXIT_S = 1.5
 
 #: Config value -> the flag that puts the window in that layer.
 _STACKING_HINTS: dict[str, Qt.WindowType] = {
@@ -125,6 +141,9 @@ class WidgetWindow(QWidget):
         self._overlay.hide()
 
         self.session: TerminalSession | None = None
+        self._started_at = 0.0
+        self._startup_scroll: QTimer | None = None
+        self._startup_deadline = 0.0
         self._apply_window_opacity()
         self.setGeometry(config.x, config.y, config.width, config.height)
 
@@ -137,17 +156,141 @@ class WidgetWindow(QWidget):
         self.session.screenUpdated.connect(self.view.update)
         self.session.ended.connect(self._on_session_ended)
         self.view.session = self.session
-        self.session.start(
-            resolve_shell(self._config),
-            environment_for(self._config),
-            working_dir_for(self._config),
-        )
+        # Before the spawn, not after: a widget showing nothing but an error
+        # should still take the scroll keys that let you read all of it.
         self.view.setFocus()
+        self._started_at = time.monotonic()
+        try:
+            self.session.start(
+                resolve_shell(self._config),
+                environment_for(self._config),
+                working_dir_for(self._config),
+            )
+        except Exception as exc:
+            # Nothing spawned, so `ended` will never fire and the window would
+            # otherwise sit there empty for good. The traceback would go to a
+            # stderr the pythonw launcher discards, so the screen is the only
+            # place this can be said.
+            # The parsed argv, not the raw string: for this whole class of
+            # bug, where the argument boundaries fell *is* the answer.
+            self._notice(
+                f"could not start the shell: {exc} "
+                f"(tried {resolve_shell(self._config)!r}). Press Esc to close "
+                "this window, or open Settings from the tray icon."
+            )
+            return
+        if self._config.scroll_top_on_start:
+            self._arm_startup_scroll()
 
     def _on_session_ended(self) -> None:
+        self._disarm_startup_scroll()
+        session = self.session
+        lived = time.monotonic() - self._started_at
+        if lived < INSTANT_EXIT_S and session is not None and not session.had_input:
+            # A shell that died this fast without being asked to did not run:
+            # it failed. Closing here would take its own error message off the
+            # screen before anyone could read it.
+            # Read the status before stop(), which drops the backend that
+            # knows it, and stop the session rather than sitting on a dead
+            # PTY -- on Windows that would hold a conhost.exe open for as
+            # long as the window stays up.
+            status = session.exit_status
+            session.stop()
+            said = "" if status is None else f", status {status}"
+            self._notice(
+                f"the shell exited after {lived:.1f}s{said}. This window is "
+                "staying open so you can read what it printed. Press Esc to "
+                "close it, or open Settings from the tray icon."
+            )
+            return
         # The shell exited. Closing follows the widget's premise: it is a
         # window that shows one shell, and that shell is gone.
         self.close()
+
+    def _notice(self, text: str) -> None:
+        """Put a word from the widget itself onto the screen.
+
+        Written through the stream like any other output, so it wraps and
+        scrolls the way the rest of the session does. GUI thread only, which
+        every caller here is -- see the threading rule in session.py.
+        """
+        if self.session is None:
+            return
+        self.session.stream.feed(f"\r\n[{DISPLAY_NAME}: {text}]\r\n")
+        self.view.update()
+
+    # -- Scroll to the top of the startup output ----------------------
+
+    def _arm_startup_scroll(self) -> None:
+        """Show the top of the shell's opening output once it stops arriving.
+
+        Split into arm/fire/disarm rather than one closure because the
+        decision is worth testing on its own, without waiting on a timer.
+        """
+        self._disarm_startup_scroll()
+        self._startup_deadline = 0.0
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(STARTUP_QUIET_MS)
+        timer.timeout.connect(self._startup_scroll_fired)
+        self._startup_scroll = timer
+        if self.session is not None:
+            self.session.screenUpdated.connect(self._on_startup_output)
+        # Deliberately not started here. The quiet period is measured from the
+        # last output, not from launch: a distro that takes a second to say
+        # anything -- which is every cold WSL start -- would otherwise spend
+        # the whole period saying nothing, fire against an empty screen, and
+        # disarm before its banner ever arrived.
+
+    def _on_startup_output(self) -> None:
+        if self._startup_scroll is None:
+            return
+        now = time.monotonic()
+        if not self._startup_deadline:
+            # The budget runs from the shell's first word for the same reason:
+            # waiting to be spoken to should not cost anything.
+            self._startup_deadline = now + STARTUP_SCROLL_TIMEOUT_S
+        elif now > self._startup_deadline:
+            self._disarm_startup_scroll()
+            return
+        self._startup_scroll.start()  # restart the quiet period
+
+    def _startup_scroll_fired(self) -> None:
+        if self._startup_scroll is None:
+            return  # already given up; a queued timeout must not undo that
+        # Typing means the user has moved on, and their first keystroke has
+        # already put the view back at the bottom where they are working. A
+        # view that is no longer at the bottom means the wheel was used, and
+        # whatever they went looking for outranks the banner.
+        session = self.session
+        if session is not None and not session.had_input:
+            if self.view.scroll_offset() == 0:
+                self.view.scroll_to_top()
+        self._disarm_startup_scroll()
+
+    def _disarm_startup_scroll(self) -> None:
+        if self._startup_scroll is None:
+            return
+        self._startup_scroll.stop()
+        self._startup_scroll = None
+        if self.session is not None:
+            self.session.screenUpdated.disconnect(self._on_startup_output)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Esc closes a window that is being held open after a failure.
+
+        Only ever reached with no live shell: while one is running the view
+        accepts every key and sends it on. It matters because holding the
+        window open takes away the documented way to close a widget on a
+        desktop with no tray -- GNOME without an extension, WSLg -- which
+        was exiting its shell.
+        """
+        if Qt.Key(event.key()) == Qt.Key.Key_Escape and (
+            self.session is None or not self.session.alive
+        ):
+            self.close()
+            return
+        super().keyPressEvent(event)
 
     # -- Modes -------------------------------------------------------
 
@@ -411,6 +554,7 @@ class WidgetWindow(QWidget):
     # -- Shutdown -----------------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._disarm_startup_scroll()
         if self.session is not None:
             self.session.stop()
             self.session = None
