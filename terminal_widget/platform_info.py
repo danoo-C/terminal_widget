@@ -93,6 +93,13 @@ def venv_script(root: Path, name: str) -> Path:
     return root / "venv" / "bin" / name
 
 
+def _launcher(name: str) -> Path | None:
+    """An installed entry-point launcher sitting beside this interpreter."""
+    bindir = Path(sys.executable).parent
+    candidate = bindir / (f"{name}.exe" if is_windows() else name)
+    return candidate if candidate.exists() else None
+
+
 def widget_launcher() -> Path | None:
     """The installed launcher for the widget, or None when running from source.
 
@@ -101,10 +108,17 @@ def widget_launcher() -> Path | None:
     might be a throwaway venv -- so the settings app disables the toggle
     rather than registering a path that will rot.
     """
-    bindir = Path(sys.executable).parent
-    name = f"{DIST_NAME}.exe" if is_windows() else DIST_NAME
-    candidate = bindir / name
-    return candidate if candidate.exists() else None
+    return _launcher(DIST_NAME)
+
+
+def settings_launcher() -> Path | None:
+    """The installed launcher for the settings app, or None from a checkout.
+
+    The tray's Settings entry prefers this over ``python -m``: on Windows it
+    is the ``gui-scripts`` launcher, which is pythonw-backed and so does not
+    flash a console window on its way up.
+    """
+    return _launcher(f"{DIST_NAME}-settings")
 
 
 def icon_path(size: int | None = None) -> Path:

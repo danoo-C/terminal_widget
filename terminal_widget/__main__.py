@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from .config import Config, config_path
 from .ipc import WidgetServer
+from .tray import WidgetTray
 from .window import WidgetWindow
 
 
@@ -36,10 +37,26 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("terminal_widget")
+    # Said outright rather than inherited. Qt clears WA_QuitOnClose for a
+    # Qt::Tool window, so the widget closing already does not end the event
+    # loop on its own; window.closed below is what does, and it fires only
+    # once the shell is torn down.
+    app.setQuitOnLastWindowClosed(False)
 
     window = WidgetWindow(config)
+    window.closed.connect(app.quit)
     window.show()
     window.start_session()
+
+    # The only way back to a widget with no taskbar button and no Alt+Tab
+    # slot, so it outlives main(): a collected tray icon is a lost widget.
+    tray = WidgetTray(window, args.config, app)
+    if not tray.available:
+        print(
+            "warning: no system tray on this desktop; open the settings app "
+            "to reach the widget, and quit it by exiting its shell.",
+            file=sys.stderr,
+        )
 
     # The settings app connecting is what enables config mode; the socket
     # dropping is what ends it. A crashed settings app therefore looks the

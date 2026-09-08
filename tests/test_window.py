@@ -4,7 +4,14 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
-from terminal_widget.config import OPACITY_BACKGROUND, OPACITY_WINDOW, Config
+from terminal_widget.config import (
+    OPACITY_BACKGROUND,
+    OPACITY_WINDOW,
+    STACKING_DESKTOP,
+    STACKING_NORMAL,
+    STACKING_TOP,
+    Config,
+)
 
 
 def press_at(window, x, y):
@@ -309,3 +316,170 @@ def test_config_mode_drag_still_moves_the_window(window):
     send(QEvent.Type.MouseMove, 340, 190,
          Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
     assert (window.x(), window.y()) == (before[0] + 40, before[1] + 40)
+
+
+def replace_stacking(window, stacking, **extra):
+    """The window's current config with a different layer."""
+    from dataclasses import replace
+
+    return replace(window.config, stacking=stacking, **extra)
+
+
+# -- Window type and stacking -----------------------------------------
+
+BOTTOM = Qt.WindowType.WindowStaysOnBottomHint
+TOP = Qt.WindowType.WindowStaysOnTopHint
+
+
+def base_type(window):
+    return window.windowFlags() & Qt.WindowType.WindowType_Mask
+
+
+def test_the_widget_is_not_an_application_window(window):
+    """Qt::Window is what gives a window a taskbar button and an Alt+Tab
+    slot, and a widget you can switch to is not part of the desktop."""
+    assert base_type(window) == Qt.WindowType.Tool
+
+
+def test_the_widget_is_still_undecorated(window):
+    assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+
+
+def test_a_tool_window_does_not_quit_the_app_on_its_own(window):
+    """Qt clears WA_QuitOnClose for anything outside Widget/Window/Dialog, so
+    closing no longer ends the event loop by itself. The `closed` signal is
+    what replaces it; this pins the reason it has to exist."""
+    assert not window.testAttribute(Qt.WidgetAttribute.WA_QuitOnClose)
+
+
+def test_closing_announces_itself(window):
+    seen = []
+    window.closed.connect(lambda: seen.append(True))
+    window.close()
+    assert seen == [True]
+
+
+def test_the_default_layer_is_behind_other_windows(window):
+    assert window.windowFlags() & BOTTOM
+    assert not window.windowFlags() & TOP
+
+
+def test_the_top_layer_asks_to_stay_on_top(qapp):
+    from terminal_widget.window import WidgetWindow
+
+    w = WidgetWindow(Config(stacking=STACKING_TOP))
+    try:
+        assert w.windowFlags() & TOP
+        assert not w.windowFlags() & BOTTOM
+    finally:
+        w.close()
+
+
+def test_the_normal_layer_asks_for_nothing(qapp):
+    """And the base type survives: a stacking hint must never eat it."""
+    from terminal_widget.window import WidgetWindow
+
+    w = WidgetWindow(Config(stacking=STACKING_NORMAL))
+    try:
+        assert not w.windowFlags() & (BOTTOM | TOP)
+        assert base_type(w) == Qt.WindowType.Tool
+    finally:
+        w.close()
+
+
+def test_a_layer_change_leaves_the_widget_visible(window):
+    """Qt hides a window whose flags change. Forgetting the second show()
+    would lose the widget outright."""
+    window.apply_config(replace_stacking(window, STACKING_TOP))
+    assert window.isVisible()
+
+
+def test_a_layer_change_keeps_the_geometry(window):
+    """Same contract as test_geometry_round_trips_exactly, for the path that
+    hides and re-shows the window underneath the user."""
+    window.setGeometry(321, 222, 640, 320)
+    before = window.geometry()
+    window.apply_config(
+        Config(x=321, y=222, width=640, height=320, stacking=STACKING_TOP)
+    )
+    assert window.geometry() == before
+    assert window.windowFlags() & TOP
+
+
+def test_a_layer_change_keeps_the_base_type(window):
+    window.apply_config(replace_stacking(window, STACKING_NORMAL))
+    assert base_type(window) == Qt.WindowType.Tool
+
+
+def test_geometry_is_not_written_back_while_restacking(window):
+    """A window manager gets to place the window again when it comes back
+    from a flags change, and that placement is not the user's intent. The
+    offscreen platform cannot produce a WM move, so the guard itself is what
+    is tested here."""
+    window.set_config_mode(True)
+    seen = []
+    window.geometryEdited.connect(lambda *a: seen.append(a))
+    window._restacking = True
+    window.setGeometry(777, 666, 400, 200)
+    window._restacking = False
+    assert (window.config.x, window.config.y) != (777, 666)
+    assert seen == []
+
+
+def test_config_mode_lifts_the_widget_out_of_the_desktop_layer(window):
+    """You cannot arrange a widget that sits underneath the settings app."""
+    window.set_config_mode(True)
+    assert not window.windowFlags() & BOTTOM
+    assert base_type(window) == Qt.WindowType.Tool
+
+
+def test_leaving_config_mode_restores_the_configured_layer(window):
+    window.set_config_mode(True)
+    window.set_config_mode(False)
+    assert window.windowFlags() & BOTTOM
+
+
+def test_a_layer_change_in_config_mode_waits_for_it_to_end(window):
+    """Previewing it live would either bury the widget under the settings app
+    or float it over the fields being typed into."""
+    window.set_config_mode(True)
+    window.apply_config(replace_stacking(window, STACKING_TOP))
+    assert not window.windowFlags() & TOP
+    window.set_config_mode(False)
+    assert window.windowFlags() & TOP
+
+
+def test_config_mode_keeps_the_terminal_focused_across_the_restack(window):
+    # focusWidget() rather than hasFocus(): the offscreen platform never
+    # activates a window.
+    window.set_config_mode(True)
+    assert window.focusWidget() is window.view
+
+
+def test_the_overlay_survives_the_restack_into_config_mode(window):
+    window.set_config_mode(True)
+    assert window._overlay.isVisible()
+    assert window._overlay.geometry() == window.rect()
+
+
+def test_translucency_survives_a_layer_change(window):
+    window.apply_config(
+        replace_stacking(window, STACKING_TOP, opacity_mode=OPACITY_BACKGROUND)
+    )
+    assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+
+def test_window_opacity_survives_a_layer_change(window):
+    window.apply_config(
+        replace_stacking(window, STACKING_TOP, opacity_mode=OPACITY_WINDOW, opacity=40)
+    )
+    assert round(window.windowOpacity(), 2) == 0.4
+
+
+def test_the_session_survives_a_layer_change(live):
+    """The PTY lives on a QThread, not on the native window, so recreating
+    the window must not disturb it."""
+    session = live.session
+    live.apply_config(replace_stacking(live, STACKING_TOP))
+    assert live.session is session
+    assert live.view.session is session

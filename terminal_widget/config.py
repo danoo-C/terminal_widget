@@ -32,6 +32,25 @@ def min_opacity(mode: str) -> int:
     return MIN_OPACITY_WINDOW if mode == OPACITY_WINDOW else MIN_OPACITY_BACKGROUND
 
 
+# Stacking layers -- see README, "Behaviour".
+STACKING_DESKTOP = "desktop"  # below normal windows: part of the desktop
+STACKING_NORMAL = "normal"  # in the ordinary window order
+STACKING_TOP = "top"  # above normal windows
+
+#: Ordered (key, label) pairs, the way available_shells() hands the settings
+#: app its dropdown. One source of truth, so the menu and the validator below
+#: cannot drift apart and offer a layer that gets thrown away on save.
+STACKING_CHOICES: tuple[tuple[str, str], ...] = (
+    (STACKING_DESKTOP, "Behind other windows"),
+    (STACKING_NORMAL, "In the normal window order"),
+    (STACKING_TOP, "Always on top"),
+)
+
+#: Built once at import: clamped() runs on every IPC message, which is every
+#: keystroke in the settings app, so it must not build a set per call.
+_STACKING_KEYS = frozenset(key for key, _label in STACKING_CHOICES)
+
+
 def config_dir() -> Path:
     """Platform-conventional configuration directory."""
     if sys.platform == "win32":
@@ -91,6 +110,10 @@ class Config:
     # -- Scrollback, in lines. 0 turns it off.
     scrollback: int = 5000
 
+    # -- Where the widget sits in the window stack. "desktop" keeps it below
+    #    normal windows, which is what makes it furniture rather than an app.
+    stacking: str = STACKING_DESKTOP
+
     def clamped(self) -> "Config":
         """Return a copy with out-of-range values pulled back into range."""
         c = Config(**asdict(self))
@@ -105,6 +128,10 @@ class Config:
         c.opacity = min(100, max(min_opacity(c.opacity_mode), int(c.opacity)))
         c.font_size = min(72, max(5, int(c.font_size)))
         c.scrollback = min(50000, max(0, int(c.scrollback)))
+        # Unlike the opacity floor, nothing derives from this, so it can be
+        # checked anywhere in here.
+        if c.stacking not in _STACKING_KEYS:
+            c.stacking = STACKING_DESKTOP
         # Deliberately not checked against the filesystem: clamped() runs on
         # every IPC message, which is every keystroke in the settings app.
         # Whether the directory exists is decided once, at spawn time.

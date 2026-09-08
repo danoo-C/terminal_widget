@@ -2,7 +2,14 @@
 
 import pytest
 
-from terminal_widget.config import OPACITY_BACKGROUND, OPACITY_WINDOW, Config
+from terminal_widget.config import (
+    OPACITY_BACKGROUND,
+    OPACITY_WINDOW,
+    STACKING_CHOICES,
+    STACKING_DESKTOP,
+    STACKING_TOP,
+    Config,
+)
 
 
 @pytest.fixture
@@ -63,10 +70,47 @@ def test_reading_the_form_back_keeps_fields_it_does_not_edit(settings):
 def test_every_hint_label_is_registered_for_theming(settings):
     """An unregistered label keeps whatever colour it was born with, which
     is the whole bug on a dark theme."""
-    assert len(settings._muted) >= 7
+    assert len(settings._muted) >= 8
 
 
 def test_the_status_line_survives_a_restyle(settings):
     settings._set_status("error", "boom")
     settings._restyle()
     assert settings.status.text() == "boom"
+
+
+# -- Window layer -----------------------------------------------------
+
+
+def test_the_layer_dropdown_offers_every_mode(settings):
+    keys = [
+        settings.combo_stacking.itemData(i)
+        for i in range(settings.combo_stacking.count())
+    ]
+    assert keys == [key for key, _label in STACKING_CHOICES]
+
+
+def test_the_layer_dropdown_round_trips(settings):
+    settings._config = Config(stacking=STACKING_TOP)
+    settings._load_into_ui()
+    assert settings.combo_stacking.currentData() == STACKING_TOP
+    assert settings._config_from_ui().stacking == STACKING_TOP
+
+
+def test_an_unknown_layer_shows_as_the_default(settings):
+    """findData misses and falls back to index 0, which has to be the same
+    value clamped() picks or the form would lie about what will be saved."""
+    settings._config = Config(stacking="sideways")
+    settings._load_into_ui()
+    assert settings.combo_stacking.currentData() == STACKING_DESKTOP
+
+
+def test_changing_the_layer_reaches_the_widget(settings):
+    """The settings app always sends it; the widget is what defers applying
+    it until config mode ends."""
+    sent = []
+    settings.client.send_config = sent.append
+    settings.combo_stacking.setCurrentIndex(
+        settings.combo_stacking.findData(STACKING_TOP)
+    )
+    assert sent and sent[-1].stacking == STACKING_TOP
