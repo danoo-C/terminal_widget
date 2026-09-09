@@ -1,7 +1,8 @@
 # Terminal Widget
 
 A terminal that lives on your desktop instead of on your taskbar.
-
+<img width="560" height="732" alt="example2" src="https://github.com/user-attachments/assets/79049a59-2c6e-43c8-b0aa-f5771abcc374" />
+<img width="1918" height="1079" alt="example1" src="https://github.com/user-attachments/assets/b00c9476-be6d-4d1d-a020-dbc8bbfa19b2" />
 One borderless window, fixed where you put it, running one shell. No title bar,
 no tabs, no menus, no close button — the way a clock or a system monitor sits on
 the desktop rather than being an application you switch to.
@@ -13,6 +14,7 @@ Runs on **Linux** and **Windows**. Python 3.11+.
 > what still needs checking there.
 
 ---
+
 
 ## What it is
 
