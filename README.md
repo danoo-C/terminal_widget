@@ -1,366 +1,90 @@
-# terminal_widget
+# Terminal Widget
 
-A desktop terminal **widget**: one borderless, headerless window that sits on your
-desktop and does exactly one thing — run a shell. No tabs, no menu bar, no title
-bar, no window chrome. Just the terminal.
+A terminal that lives on your desktop instead of on your taskbar.
 
-Configuration lives in a **separate settings app**, so the widget itself stays
-free of UI clutter.
+One borderless window, fixed where you put it, running one shell. No title bar,
+no tabs, no menus, no close button — the way a clock or a system monitor sits on
+the desktop rather than being an application you switch to.
 
-Runs on **Linux** and **Windows**.
+Runs on **Linux** and **Windows**. Python 3.11+.
 
-> **Status: installable and working on Linux.** One command installs
-> everything -- a private environment, launcher entries, optional autostart,
-> and an uninstaller. The widget and settings app both work, and 277 tests
-> cover them. **Not yet verified on Windows:** the code is there and the paths
-> are right, but it has never been run.
+> **Status:** working and installable on Linux, with 279 tests covering it. The
+> Windows code paths are written but have never been run — see `issues.md` for
+> what still needs checking there.
 
 ---
 
-## The idea
+## What it is
 
-Most terminal emulators are applications you *switch to*. This one is meant to be
-*part of the desktop* — always in the same spot, always showing the same shell,
-the way a clock or system-monitor widget is. It should feel less like a program
-you launch and more like a panel that happens to be a terminal.
+Two programs, installed together:
 
-That means:
-
-- **No decorations.** No title bar, no borders, no close/minimize buttons.
-- **Not an application.** No taskbar button, no Alt+Tab slot. Alt+Tab is the
-  literal act of switching to an application, and a desktop widget should never
-  ask for that attention. It is a tool window; the tray icon and the settings
-  app are how you reach it.
-- **Stays put.** Fixed position and size, remembered between sessions — and, by
-  default, behind your other windows, the way a Rainmeter skin is.
-- **One shell, no tabs.** If you want tabs, you want a different program.
-- **Configured elsewhere.** Everything tunable lives in the settings app.
-
-## Two components
-
-| Component | What it is |
+| | |
 | --- | --- |
-| **Widget** (`terminal_widget`) | The borderless window. Spawns a shell in a pseudo-terminal, renders its output, forwards your keystrokes. Reads config; never asks questions. One runs per config file; a second launch brings the first to the front instead of starting a rival to it. |
-| **Settings app** (`terminal_widget.settings`) | A normal, decorated window. Edits the config — geometry, shell, opacity, appearance — and puts the widget into config mode for as long as it is open. |
-
-Both are launched from the same package, so a single install gives you both.
-
----
-
-## The two modes
-
-This is the core of the design. The widget is always in exactly one of two modes,
-and **the mode is determined by a single fact: whether the settings app is
-running.** There is no mode toggle, no hotkey, no right-click menu. Open settings
-to arrange the widget; close settings to use it.
-
-### Config mode — settings app is open
-
-The widget becomes a window you can arrange:
-
-- **Drag from anywhere.** Click and drag anywhere inside the terminal to move the
-  window. There is no title bar, so the entire surface is the drag handle.
-- **Resize like a normal window.** Edge and corner handles, the usual cursors.
-- **Live preview.** Opacity, font, and color changes from the settings app apply
-  immediately — no restart, no apply button needed to *see* the result.
-- **The shell keeps running.** Entering or leaving config mode never restarts your
-  session. (Changing the shell program is the one exception — see below.)
-- **Visibly distinct.** The widget shows an outline or similar affordance while in
-  config mode, so it is never ambiguous which mode you are in.
-- **Lifted into view.** Whatever layer the widget normally lives in, opening
-  settings puts it in the normal window order and brings it forward, so you are
-  never arranging something you cannot see. Its configured layer comes back the
-  moment you close settings.
-
-**Trade-off, stated plainly:** because click-and-drag anywhere moves the window,
-you cannot select text with the mouse while config mode is active. Config mode is
-meant to be brief — you open settings, arrange the widget, close settings.
-
-### Locked mode — settings app is closed
-
-The widget becomes a pure terminal:
-
-- **It does not move.** Dragging does nothing. Position is frozen.
-- **It does not resize.** No handles, no resize cursors. Size is frozen.
-- **It is still a real terminal.** Click it to take keyboard focus, type commands,
-  read output, scroll back with the wheel, select text with the mouse and copy it.
-  Everything you expect of a terminal.
-
-Put differently: locked mode ignores *window-management* gestures and nothing
-else. It is a terminal without a title bar, not a picture of a terminal.
-
-### Mode transitions at a glance
-
-| | Config mode | Locked mode |
-| --- | --- | --- |
-| Settings app | open | closed |
-| Drag to move | **yes**, from anywhere | no |
-| Resize handles | **yes** | no |
-| Keyboard input to shell | yes | yes |
-| Mouse text selection | no (drag moves window) | yes |
-| Mouse wheel scrollback | no (window owns the mouse) | yes |
-| Window layer | lifted to the normal order | as configured |
-| Taskbar button / Alt+Tab | no | no |
-| Shell session | continues | continues |
-
----
-
-## Settings reference
-
-Everything the settings app exposes.
-
-### Geometry
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| X position | pixels | Top-left corner of the widget. |
-| Y position | pixels | |
-| Width | pixels | |
-| Height | pixels | |
-
-**Geometry is two-way.** Dragging or resizing the widget in config mode updates
-these numbers live in the settings app; typing a number into the settings app
-moves or resizes the widget live. They are two views of one value, not a form you
-submit.
-
-Width and height are entered in pixels, but a terminal is a character grid, so the
-settings app also displays the resulting grid size (e.g. `98 × 27 cells`) as you
-adjust them.
-
-### Shell
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Terminal program | dropdown | The shell the widget spawns. |
-| Custom command | text | Free-form command line, when the dropdown is set to *Custom*. |
-| Start in | path | Directory the shell opens in. Empty means the shell's own default. |
-
-The dropdown offers what actually exists on the current platform:
-
-- **Windows:** Command Prompt (`cmd.exe`), PowerShell, WSL, Custom
-- **Linux:** Bash, Zsh, Fish, the login shell from `$SHELL`, Custom
-
-**Custom command** is parsed by the rules of the platform it runs on, so a quoted
-argument survives to the program that needs it: `CommandLineToArgvW` semantics on
-Windows, where backslashes are path separators and `"..."` groups a word, and
-shell-like quoting on Linux. `wsl -d kali-linux -- zsh -c "fastfetch; exec zsh"`
-therefore reaches zsh as one `-c` script rather than as a command named
-`"fastfetch; exec zsh"` — see `issues.md`, issue 2, for the version that did the
-latter.
-
-The shell and the directory it starts in are both read when the widget launches,
-so changing either takes effect the next time it starts rather than restarting the
-running session under you. **Start in** accepts `~` and environment variables; a
-directory that no longer exists is ignored rather than taken as an instruction,
-because the shell chdirs after forking and a bad path there would kill the widget
-at launch with nothing on screen to explain why.
-
-### Appearance
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Opacity | 0–100% | How transparent the widget is. The floor depends on the mode. |
-| Opacity applies to | choice | *Background only* or *Entire window* — see below. |
-
-Two opacity behaviours, selectable:
-
-- **Background only** *(recommended default)* — the desktop shows through behind
-  the terminal, but characters render fully opaque. Text stays sharp and readable
-  even at low opacity. This is what most desktop terminal widgets do. It goes all
-  the way down to **0%**, which is the point of it: no window at all, just text
-  lying on the desktop.
-- **Entire window** — text and background fade together, like a normal window's
-  opacity. Simpler, more uniform, but text washes out quickly. This one stops at
-  **10%**: below that the glyphs go too, and a window you cannot see is a window
-  you cannot find again to turn back up. Switching to this mode raises a lower
-  value to 10 rather than making the widget vanish.
-
-Even at 0% the backdrop is painted one part in 255 rather than truly clear, so
-every pixel of the widget still takes a click. A completely transparent pixel of
-a layered window is click-through on Windows, which would leave the widget
-unclickable everywhere except exactly on a letter.
-
-Font family, font size, and color scheme also live here.
-
-### Behaviour
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Window layer | choice | Behind other windows (default), the normal order, or always on top. |
-
-**Behind other windows** is what makes the widget part of the desktop rather
-than something in front of it: anything you open covers it, and you get it back
-by clearing the desktop — exactly the bargain a Rainmeter skin makes. **Always
-on top** is the opposite trade, for a widget you want in view while you work.
-**The normal window order** puts it in the ordinary stack, where clicking brings
-it forward.
-
-None of the three gives the widget a taskbar button or an Alt+Tab slot, so the
-tray icon and this settings app are how you reach it in every case.
-
-The setting applies when you *close* settings, not while you are editing it.
-Config mode lifts the widget into the normal order for as long as settings is
-open — previewing "behind everything" would bury the thing you are trying to
-drag, and previewing "always on top" would float it over the fields you are
-typing into.
-
-One platform difference worth knowing: on Windows the below-layer is a single
-`SetWindowPos(HWND_BOTTOM)` applied when the window is created, because Windows
-has no persistent stay-below state. Clicking the widget brings it forward until
-you click elsewhere. On X11 the WM holds `_NET_WM_STATE_BELOW`, so it stays put.
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Scrollback | 0–50000 lines | How far the wheel can scroll back. 5000 by default; 0 turns it off. |
-
-There is no scrollbar and no chrome to put one in, so the wheel is the whole
-interface. Shift+PageUp/PageDown move by a page and Shift+Home/End jump to either
-end; typing anything returns to the bottom. Output arriving while you are scrolled
-up does not drag the view down with it. Full-screen programs — `vim`, `less`,
-`htop` — do not feed the scrollback, so what is in it is the session you actually
-had rather than a flipbook of redraws.
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Scroll to the top when the shell starts | on/off | Off by default. |
-
-For a shell that greets you with something worth looking at. A `fastfetch` banner
-is usually taller than the widget, so what you would otherwise see is its last few
-lines. With this on, the widget waits for the startup output to stop arriving and
-then jumps to its first line; the first key you press returns you to the prompt, so
-it costs nothing the moment you actually want to type. It needs scrollback to have
-somewhere to scroll back to — with scrollback off, or a banner that already fits, it
-does nothing. A shell that is still printing five seconds in is left alone rather
-than yanked to the top later.
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Keep shell history separate | on/off | On by default. |
-
-With this on, the widget's shell writes to its own history file
-(`~/.config/terminal_widget/shell_history`) instead of the one your login
-shell uses. A widget you type the occasional command into should not be
-rewriting the history of the terminal you actually work in. Turn it off to
-share one history with everything else.
-
-| Setting | Type | Notes |
-| --- | --- | --- |
-| Start automatically on login | on/off | Applied immediately, not on Save. |
-
-Autostart is an operating-system setting, not a config field, so the checkbox
-reads the real state rather than a remembered one -- an XDG autostart entry on
-Linux, a per-user `Run` registry value on Windows. Neither needs administrator
-rights. It is disabled, with the reason shown, when the widget is running from
-a source checkout (no stable path to register) or under WSL (no persistent
-desktop session for it to run in).
-
-### Selecting and copying
-
-Drag to select. Double-click takes a word — paths and URLs count as one — and
-triple-click takes a line with its newline. Dragging past the top or bottom edge
-scrolls while you hold it. A selection is anchored to the text, not the screen, so
-it survives scrolling and output arriving underneath it.
-
-| Key | Does |
-| --- | --- |
-| `Ctrl+C` | Copies **when something is selected**; otherwise sends the usual interrupt. |
-| `Ctrl+Shift+C` | Always copies, for when `Ctrl+C` needs to reach the shell. |
-| `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Paste. |
-| Right click | Paste. Middle click pastes the X11 primary selection. |
-
-`Ctrl+C` is deliberately conditional: a copy shortcut that also killed whatever
-was running would be worse than no copy shortcut. Binding `Ctrl+V` to paste does
-cost the shell `\x16` (readline's quoted-insert, `vim`'s visual block) — the
-trade most terminals on Windows make, and `Ctrl+Shift+V` is there regardless.
-
-Pastes are bracketed when the shell asks for it (DEC mode 2004), so pasting a
-block of lines hands them over as text instead of running each one as it arrives.
-
-### Configuration
-
-Shows where the config file lives, with an **Open config folder** button that
-opens it in the system file manager.
-
----
-
-## Architecture
-
-The hard part of a cross-platform terminal widget is that "spawn a terminal" means
-two very different things on Linux and Windows. The plan is to **emulate the
-terminal ourselves** rather than embed someone else's:
-
-```
-  ┌─────────────────────────────┐
-  │  Widget window (frameless)  │   PySide6 / Qt6
-  │  ┌───────────────────────┐  │
-  │  │  Terminal renderer    │  │   draws the screen buffer
-  │  └───────────┬───────────┘  │
-  └──────────────┼──────────────┘
-                 │ screen state
-        ┌────────┴────────┐
-        │  VT emulator    │         pyte — parses escape sequences
-        └────────┬────────┘
-                 │ raw bytes
-        ┌────────┴────────┐
-        │   PTY backend   │         platform split
-        └────────┬────────┘
-         ┌───────┴────────┐
-   ptyprocess           pywinpty
-   (Linux PTY)      (Windows ConPTY)
-```
-
-**Why this shape:** the alternative — reparenting an existing terminal emulator's
-window into ours (XEmbed on Linux, `SetParent` on Windows) — is far less code but
-breaks on Wayland, behaves differently on every desktop environment, and gives no
-control over appearance. Emulating the terminal keeps behaviour and looks
-identical on both platforms, at the cost of writing a renderer.
-
-### How the two processes talk
-
-The widget must know, continuously, whether the settings app is open, and the two
-must share geometry live in both directions. That needs a real channel — a local
-socket (Unix domain socket on Linux, named pipe on Windows) carrying:
-
-- settings app → widget: *entering config mode*, *setting changed*, *leaving config mode*
-- widget → settings app: *user dragged me here*, *user resized me to this*
-
-The connection dropping **is** the "settings app closed" signal, which means an
-ordinary quit and a crash both correctly return the widget to locked mode. The
-widget must never get stuck in config mode because the settings app died.
-
-### Dependencies
-
-| Package | Role |
-| --- | --- |
-| `PySide6` | GUI toolkit (Qt 6). Frameless windows, per-pixel opacity, cross-platform. LGPL. |
-| `pyte` | Pure-Python VT100/xterm screen emulator. Turns raw shell bytes into a character grid. |
-| `ptyprocess` | PTY handling on Linux. |
-| `pywinpty` | ConPTY handling on Windows. |
+| **Widget** | The borderless window. Runs a shell in a pseudo-terminal, draws its output, takes your keystrokes. Never asks you anything. |
+| **Settings app** | An ordinary window that edits the configuration. Opening it is also what unlocks the widget for moving and resizing. |
+
+There is no settings menu on the widget itself, because there is nowhere to put
+one. **Open the settings app and the widget becomes draggable and resizable;
+close it and the widget locks back into place.** That is the whole interaction
+model — no mode toggle, no hotkey, no right-click menu.
+
+Because the widget has no taskbar button and no Alt+Tab entry, a **tray icon** is
+how you reach it: show it, open settings, or quit.
+
+## What it does
+
+**The shell.** Pick from the shells found on your system, or give it any command
+line you like — `wsl -d kali-linux -- zsh -c "fastfetch; exec zsh"` works, quoting
+and all. Optionally start it in a chosen directory, and keep its history in its
+own file so a desktop scratch terminal does not rewrite the history of the
+terminal you actually work in.
+
+**Appearance.** Font family and size, foreground and background colours, and
+opacity from 0–100% — either fading the whole window or just the backdrop, which
+leaves the text crisp on your wallpaper.
+
+**Position and layering.** Exact pixel geometry, remembered between sessions.
+Sits behind your other windows by default, or in the normal window order, or
+always on top.
+
+**Scrollback.** Up to 50,000 lines, scrolled with the wheel or
+Shift+PageUp/PageDown/Home/End. Full-screen programs like `vim` and `htop` do not
+pour their redraws into it. Optionally, jump to the top of the shell's startup
+output once it finishes printing, so a banner taller than the window reads from
+its first line.
+
+**Selection and clipboard.** Drag to select; double-click for a word, triple for a
+line. `Ctrl+C` copies when there is a selection and sends an interrupt when there
+is not, so it can never kill a running program by surprise. `Ctrl+Shift+C` always
+copies. `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` and right-click paste, bracketed
+when the shell asks for it.
+
+**Starting up.** Optional autostart on login. One widget runs per config file, so
+launching a second one brings the first to the front rather than starting a rival
+to it — two widgets sharing a config would overwrite each other's settings.
 
 ---
 
 ## Installing
 
-Requires **Python 3.11+** (developed against 3.13). Nothing needs administrator
-rights, and nothing is installed outside your home directory.
+Nothing needs administrator rights, and nothing is installed outside your home
+directory.
 
 ```bash
 git clone https://github.com/danoo-C/terminal_widget.git
 cd terminal_widget
-python3 install.py
+python3 install.py          # py install.py on Windows
 ```
 
-On Windows, `py install.py`.
+That opens a graphical installer, which creates a private Python environment,
+installs both programs into it, adds a Start Menu or application-launcher entry,
+optionally enables autostart, and writes an uninstaller.
 
-That opens a graphical installer which creates a private environment, installs
-the application into it, adds a Start Menu or application-launcher entry, and
-optionally enables autostart. It also writes an uninstaller.
+The installer uses tkinter. It ships with the official Windows Python; on Linux
+it is usually one package away (`sudo apt install python3-tk`), and without it
+the installer falls back to a text version and tells you the command.
 
-`install.py` uses tkinter, which ships with the official Windows Python. On
-Linux it is usually one package away (`sudo apt install python3-tk`); if it is
-missing, the installer falls back to a text version and tells you the command.
-
-### Installer options
+### Options
 
 ```
 python3 install.py --cli          text installer instead of the GUI
@@ -370,19 +94,21 @@ python3 install.py --prefix PATH  install somewhere other than the default
 python3 install.py --uninstall    remove it again
 ```
 
+### Where things go
+
 | | Linux | Windows |
 | --- | --- | --- |
-| Installed to | `~/.local/share/terminal-widget/` | `%LOCALAPPDATA%\TerminalWidget\` |
+| Program | `~/.local/share/terminal-widget/` | `%LOCALAPPDATA%\TerminalWidget\` |
 | Shortcuts | `~/.local/share/applications/` | Start Menu |
-| Autostart | `~/.config/autostart/` | `HKCU\...\CurrentVersion\Run` |
-| **Config (never touched)** | `~/.config/terminal_widget/` | `%APPDATA%\terminal_widget\` |
+| Autostart | `~/.config/autostart/` | `HKCU\…\CurrentVersion\Run` |
+| Settings | `~/.config/terminal_widget/` | `%APPDATA%\terminal_widget\` |
 
-Configuration lives outside the install directory on purpose, so reinstalling
+Your settings live outside the program directory on purpose, so reinstalling
 keeps the widget exactly where you put it.
 
-### System dependencies (Linux only)
+### Linux system packages
 
-Qt needs a handful of X11 libraries that are not always installed:
+Qt needs a few X11 libraries that are not always present:
 
 ```bash
 sudo apt install libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
@@ -390,9 +116,9 @@ sudo apt install libegl1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
     libxkbcommon-x11-0
 ```
 
-The installer checks for these and stops with the exact command for your
-distribution if they are missing, rather than leaving you with an install that
-crashes on launch. Windows needs no equivalent step.
+The installer checks for these and stops with the right command for your
+distribution rather than leaving you an install that crashes on launch. Windows
+needs no equivalent step.
 
 ### Removing it
 
@@ -400,154 +126,46 @@ crashes on launch. Windows needs no equivalent step.
 python3 ~/.local/share/terminal-widget/uninstall.py
 ```
 
-This removes only what the install manifest records. Your settings are kept
-unless you pass `--purge`.
+Removes only what the install recorded. Your settings are kept unless you add
+`--purge`.
 
-## Running
+---
 
-After installing, launch **Terminal Widget Settings** from the Start Menu or
-application launcher, or run the commands directly:
+## Using it
+
+After installing, launch **Terminal Widget Settings** from your Start Menu or
+application launcher — or run either program directly:
 
 ```bash
 ~/.local/share/terminal-widget/venv/bin/terminal-widget
 ~/.local/share/terminal-widget/venv/bin/terminal-widget-settings
 ```
 
-Start the widget first, then open settings whenever you want to move, resize or
-reconfigure it. The settings app can also launch the widget itself, and if you
-open settings with no widget running it still edits the config file for next
-time.
+The settings app can start the widget itself. Its button reads **Launch widget**
+when none is running and **Restart widget** when one is; restarting is how the
+settings that are only read at startup — the shell, its working directory, the
+startup scroll — take effect.
 
-The button at the bottom left reads **Launch widget** when none is running and
-**Restart widget** when one is. Restart is how the settings that are only read at
-launch — the shell, its working directory, and the startup scroll — take effect
-without you going to the tray. It saves first, asks the running widget to quit,
-and the widget starts its replacement itself once it has let go of everything;
-nothing else knows when that has happened.
+Run `terminal-widget-debug` instead if something goes wrong and you want to see
+why: it is the same program with a console attached.
 
-**One widget runs per config file.** Two widgets sharing a config each hold their
-own copy of it and each write the whole thing back when they exit, so the second
-one to quit silently reverts everything you changed in between. A lock file beside
-the config (`config.json.lock`) is what prevents that, so launching a second widget
-brings the first one to the front and exits rather than starting one. Pass
-`--config PATH` to both the widget and the settings app to run a second, separate
-widget on a second config file — that is the supported way to try a different
-layout without disturbing the one you use.
+---
 
-One upgrade note: quit any running widget before installing a new version. The
-socket is named after the config file from this release on, so a widget from an
-older build and a widget from this one cannot see each other, and would go back
-to fighting over the config for that one session.
-
-### The tray icon
-
-Because the widget has no taskbar button, no Alt+Tab entry and no close button,
-the tray icon is how you reach it:
-
-| Entry | Does |
-| --- | --- |
-| **Show** | Brings the widget to the front and focuses it, from any layer and from minimised. |
-| **Settings** | Opens the settings app — or just raises the widget, if one is already open. |
-| **Quit** | Closes the widget, shutting its shell down on the way. |
-
-Left-clicking the icon does **Show**. There is no switch to turn the tray icon
-off: it is the only way back to a covered widget and the only way to quit one
-that has no close button, which is the same reason whole-window opacity stops
-at 10% rather than 0.
-
-Where there is no tray at all — GNOME without an extension, and WSLg — the
-widget says so on stderr and runs anyway. The settings app is then the way to
-reach it, and exiting its shell is the way to close it. The one case where that
-is not available is a widget held open after a shell that failed to start, which
-never had a shell to exit: **Esc** closes that one.
-
-## Developing
+## Development
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate        # .venv\Scripts\Activate.ps1 on Windows
 pip install -e ".[dev]"
 
-python -m pytest tests/          # offscreen, no display needed
-python -m pyright                # type checking
-python -m terminal_widget        # run from source
-python -m terminal_widget.settings
+python -m pytest                 # offscreen; no display needed
+pyright
 ```
 
-The test suite runs on Qt's offscreen platform. Tests that need a local socket
-skip themselves where the environment forbids binding one.
-
-## Layout
-
-```
-terminal_widget/
-├── install.py             # the installer, GUI and CLI
-├── pyproject.toml         # packaging and entry points
-├── terminal_widget/
-│   ├── __main__.py        # widget entry point
-│   ├── window.py          # frameless window; the two modes
-│   ├── renderer.py        # draws the screen; viewport and selection
-│   ├── screen.py          # pyte screen + scrollback; absolute row space
-│   ├── session.py         # shell lifecycle + reader thread
-│   ├── keys.py            # Qt key events -> escape sequences
-│   ├── config.py          # load / save / defaults / shells
-│   ├── platform_info.py   # platform facts, stdlib only
-│   ├── ipc.py             # local socket to the settings app, and the one-widget lock
-│   ├── launch.py          # starting a widget: one place, so three callers agree
-│   ├── tray.py            # tray icon: the way back to a covered widget
-│   ├── pty/               # ptyprocess (Linux) / pywinpty (Windows)
-│   ├── autostart/         # XDG entry (Linux) / Run key (Windows)
-│   ├── assets/            # application icon
-│   └── settings/          # the settings app
-├── tools/make_icon.py     # regenerates the icon
-├── tests/                 # offscreen, no display needed
-├── LICENSE
-└── README.md
-```
-
-`platform_info.py` and `autostart/` are deliberately stdlib-only: the installer
-imports them before any dependency exists.
-
-Config lives in the platform-conventional spot — `~/.config/terminal_widget/`
-on Linux, `%APPDATA%\terminal_widget\` on Windows.
-
-## Known unknowns
-
-Things that will need deciding or discovering as the code gets written:
-
-- **Wayland.** Setting a window's absolute position is not permitted under
-  Wayland, which is a direct problem for a widget whose whole point is living at
-  fixed coordinates. May need an X11-only path plus a documented limitation.
-- **Window stacking.** *Decided:* the user picks, and the default is below normal
-  windows. Not pinned to the desktop layer proper — that means parenting to the
-  `WorkerW` window behind the desktop icons on Windows, which has no supported
-  API and has to be redone every time Explorer restarts. So the widget is
-  *below other windows*, not *behind the desktop icons*. What is still open is
-  how well the below-layer holds on Windows, where it is applied once at window
-  creation rather than kept by the shell.
-- **Show desktop.** Win+D minimises windows; Rainmeter survives it by living on
-  the desktop layer, and a tool window may not. Unverified. The tray icon's
-  **Show** is the recovery either way.
-- **Resize granularity.** Free-pixel resizing leaves partial character cells at
-  the edges; snapping to whole cells fights the OS resize handles. Needs a call.
-- **Frame vs client coordinates.** Some window managers put a frame around a
-  frameless window. The widget stores client coordinates throughout, because
-  `setGeometry` uses them while `QWidget.x()` reports the frame -- mixing the
-  two made the widget drift by the frame offset on every launch.
-- **Font rendering performance.** Repainting a full character grid per frame can
-  be slow if done naively; will likely need dirty-region tracking.
-- **Scrollback reflow.** pyte does not rewrap on a width change, and retired
-  lines keep the width they had, so widening the widget and scrolling up shows the
-  old wrapping. Growing the window also does not pull lines back out of the
-  scrollback the way xterm does; both would mean reimplementing `resize`.
-- **Shell exit.** The widget closes when the shell exits, which is the premise:
-  it is a window that shows one shell. The exception is a shell that dies within a
-  second and was never typed into — that did not run, it failed, so the window stays
-  up with what it printed, says so, and takes Esc to close. Respawning may still
-  suit a permanent desktop widget better.
-- **Windows.** Nothing has ever been run on Windows -- not the ConPTY backend,
-  not the installer, not the Start Menu shortcuts or the Run-key autostart.
+[`issues.md`](issues.md) records the bugs found in real use, with what caused
+each one and what the fix was; [`megapromt/PASS_2.md`](megapromt/PASS_2.md) is
+the design brief behind the unusual choices.
 
 ## License
 
-[MIT](LICENSE) © 2026 Daniel Danko
+MIT. See [LICENSE](LICENSE).
