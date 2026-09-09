@@ -740,6 +740,38 @@ From WSL, with real processes and real sockets:
 
 Nothing was run on Windows.
 
+### Postscript: the startup scroll did not survive a cold WSL start
+
+Reported from Windows on 2026-09-09, against a custom command of
+`wsl -d kali-linux -- zsh -c fastfetch;zsh`: the scroll to the top never
+happened.
+
+It reproduces on Linux the moment the output has a pause in it, which a cold
+`wsl -d <distro>` always does -- it says something, stalls while the distro
+wakes up, and only then runs fastfetch:
+
+```
+history: 13 | offset: 0 | still armed: False      <- at the bottom, already given up
+top row: ',d0Odlc;,..  Terminal'                   <- mid-banner, not line 1
+```
+
+The quiet-gap timer fired during the stall, when nothing had scrolled off yet.
+Scrolling to the top of an empty scrollback does nothing -- and the code then
+counted that as its one go and disarmed, so the banner arriving afterwards was
+never scrolled to.
+
+This is the third variant of the same mistake in this feature, and the pattern
+is worth naming: **a gap in the output is not the same thing as the end of the
+output.** The first version started the clock at launch, so a shell slow to its
+first word lost. The fix for that started the clock at the first word, so a
+shell that pauses mid-sentence lost. Now an empty scrollback does not consume
+the one go, and the budget was raised from 5s to 15s, because it only ever
+counts against a user who has neither typed nor touched the wheel.
+
+Both new cases are pinned by tests --
+`test_a_shell_that_pauses_before_filling_the_screen_still_gets_its_scroll` and
+`test_a_shell_that_stalls_past_the_budget_is_left_alone`.
+
 ### To verify on Windows
 
 - [ ] Launching a second widget from the Start Menu shortcut brings the running
@@ -751,6 +783,9 @@ Nothing was run on Windows.
 - [ ] `taskkill /F` on the widget leaves the lock behind, and the next launch
       reclaims it rather than refusing to start
 - [ ] Two widgets on two different `--config` files still both run
+- [ ] With **Scroll to the top when the shell starts** on, a cold
+      `wsl -d kali-linux -- zsh -c fastfetch;zsh` shows fastfetch from its
+      first line -- the case the postscript above is about
 - [ ] A config directory that cannot be written warns and still starts the widget
 - [ ] The settings app finds the widget it was pointed at when both are given
       `--config`

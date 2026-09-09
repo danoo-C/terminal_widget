@@ -52,6 +52,11 @@ testpaths = ["tests"]
 
 [tool.pyright]
 include = ["terminal_widget", "tests", "install.py", "tools"]
+# Said outright rather than left to discovery. Without it, pyright only finds
+# PySide6 when it happens to inherit an activated venv, and a plain `pyright`
+# from a fresh shell reports sixty import errors that are not there.
+venvPath = "."
+venv = ".venv"
 # Both platforms are targets, and winreg only exists on one of them. Without
 # this, every registry call is an error when checking from Linux.
 pythonPlatform = "All"

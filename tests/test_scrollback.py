@@ -230,3 +230,37 @@ def test_a_banner_that_fits_leaves_the_view_where_it_was(live):
     feed(live, "just one line")
     live._startup_scroll_fired()
     assert live.view.scroll_offset() == 0
+
+
+def test_a_shell_that_pauses_before_filling_the_screen_still_gets_its_scroll(live):
+    """The regression test for the bug reported from Windows. A cold
+    `wsl -d kali-linux` prints something, stalls while the distro wakes up,
+    and only then runs fastfetch. The quiet gap during that stall used to fire
+    the scroll while nothing had scrolled off yet -- which does nothing, since
+    there is nothing above the screen to show -- and then counted as our one
+    go, so the banner that arrived afterwards was never scrolled to."""
+    live._arm_startup_scroll()
+    feed(live, "starting kali...", "")  # trailing "" so the banner starts a new line
+    live.view.session.screenUpdated.emit()
+
+    live._startup_scroll_fired()  # the gap during the stall
+    assert live._startup_scroll is not None, "must not have used up its one go"
+
+    feed(live, *numbers(60, prefix="banner"))
+    live._startup_scroll_fired()  # the real gap, after the banner
+    assert live.view.scroll_offset() == len(live.view.session.screen.history)
+    assert top_row_text(live.view) == "starting kali..."
+
+
+def test_a_shell_that_stalls_past_the_budget_is_left_alone(live):
+    """The waiting is bounded: a startup that is still dribbling output long
+    afterwards must not yank the view once it finally draws breath."""
+    live._arm_startup_scroll()
+    feed(live, "starting...")
+    live.view.session.screenUpdated.emit()
+    live._startup_deadline = time.monotonic() - 1  # as if the budget had run out
+    live._startup_scroll_fired()
+    assert live._startup_scroll is None
+    feed(live, *numbers(60))
+    live._startup_scroll_fired()
+    assert live.view.scroll_offset() == 0

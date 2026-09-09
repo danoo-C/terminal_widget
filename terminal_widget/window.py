@@ -45,10 +45,12 @@ _NO_HINT = Qt.WindowType(0)
 #: that, so a gap in the output stands in for one.
 STARTUP_QUIET_MS = 400
 
-#: And how long we go on waiting for that gap. A shell still printing after
-#: this was never going to have an opening worth reading, and yanking the view
-#: to the top of it minutes later would be a surprise rather than a feature.
-STARTUP_SCROLL_TIMEOUT_S = 5.0
+#: And how long we go on waiting for that gap, measured from the shell's first
+#: word. Generous, because a cold `wsl -d <distro>` can spend ten seconds
+#: waking up in the middle of its own startup output, and mean it: the scroll
+#: only ever happens while the user has neither typed nor touched the wheel,
+#: so a long wait costs nothing and a short one loses the banner entirely.
+STARTUP_SCROLL_TIMEOUT_S = 15.0
 
 #: Under this, a shell that exits did not run: it failed. The window stays up
 #: so whatever it printed can be read, instead of closing over the evidence.
@@ -256,16 +258,29 @@ class WidgetWindow(QWidget):
         self._startup_scroll.start()  # restart the quiet period
 
     def _startup_scroll_fired(self) -> None:
-        if self._startup_scroll is None:
+        timer = self._startup_scroll
+        if timer is None:
             return  # already given up; a queued timeout must not undo that
         # Typing means the user has moved on, and their first keystroke has
         # already put the view back at the bottom where they are working. A
         # view that is no longer at the bottom means the wheel was used, and
         # whatever they went looking for outranks the banner.
         session = self.session
-        if session is not None and not session.had_input:
-            if self.view.scroll_offset() == 0:
-                self.view.scroll_to_top()
+        if session is None or session.had_input or self.view.scroll_offset() != 0:
+            self._disarm_startup_scroll()
+            return
+        if not session.screen.history:
+            # Nothing has scrolled off, so there is nothing above the screen to
+            # show and scrolling now would do nothing at all -- while counting
+            # as our one go. This is not the gap we are waiting for: it is the
+            # shell pausing before it has filled the screen, which is every
+            # cold `wsl -d <distro>` start. Keep waiting for the real one.
+            if time.monotonic() > self._startup_deadline:
+                self._disarm_startup_scroll()
+            else:
+                timer.start()
+            return
+        self.view.scroll_to_top()
         self._disarm_startup_scroll()
 
     def _disarm_startup_scroll(self) -> None:
