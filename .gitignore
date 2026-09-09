@@ -75,3 +75,5 @@ logs/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+claude_chats/
