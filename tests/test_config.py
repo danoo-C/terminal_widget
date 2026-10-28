@@ -139,6 +139,30 @@ def test_scrollback_clamps_to_its_range():
     assert Config(scrollback=10**9).clamped().scrollback == 50000
 
 
+# -- Show desktop delay -------------------------------------------------
+
+
+def test_show_desktop_delay_defaults_to_a_quarter_second():
+    assert Config().show_desktop_delay_ms == 250
+
+
+def test_show_desktop_delay_clamps_to_its_range():
+    assert Config(show_desktop_delay_ms=-5).clamped().show_desktop_delay_ms == 0
+    assert Config(show_desktop_delay_ms=10**9).clamped().show_desktop_delay_ms == 2000
+
+
+def test_show_desktop_delay_survives_a_save(tmp_path):
+    path = tmp_path / "c.json"
+    Config(show_desktop_delay_ms=400).save(path)
+    assert Config.load(path).show_desktop_delay_ms == 400
+
+
+def test_a_config_from_before_the_delay_gets_the_default(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"stacking": "desktop"}')
+    assert Config.load(path).show_desktop_delay_ms == 250
+
+
 # -- Working directory ------------------------------------------------
 
 

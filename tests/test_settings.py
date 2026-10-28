@@ -7,6 +7,7 @@ from terminal_widget.config import (
     OPACITY_WINDOW,
     STACKING_CHOICES,
     STACKING_DESKTOP,
+    STACKING_NORMAL,
     STACKING_TOP,
     Config,
 )
@@ -129,6 +130,61 @@ def test_ticking_scroll_to_top_reaches_the_widget(settings):
     settings.client.send_config = sent.append
     settings.check_scroll_top.setChecked(True)
     assert sent and sent[-1].scroll_top_on_start is True
+
+
+# -- Show desktop delay -----------------------------------------------
+
+
+def test_the_show_desktop_delay_round_trips(settings):
+    settings._config = Config(show_desktop_delay_ms=400)
+    settings._load_into_ui()
+    assert settings.spin_show_desktop_delay.value() == 400
+    assert settings._config_from_ui().show_desktop_delay_ms == 400
+
+
+def test_the_show_desktop_delay_reaches_the_widget(settings):
+    sent = []
+    settings.client.send_config = sent.append
+    settings.spin_show_desktop_delay.setValue(650)
+    assert sent and sent[-1].show_desktop_delay_ms == 650
+
+
+def test_zero_reads_immediately(settings):
+    settings.spin_show_desktop_delay.setValue(0)
+    assert settings.spin_show_desktop_delay.text() == "Immediately"
+
+
+def test_the_delay_spin_box_stops_where_the_config_clamps(settings):
+    from terminal_widget.config import SHOW_DESKTOP_DELAY_MAX_MS
+
+    assert settings.spin_show_desktop_delay.maximum() == SHOW_DESKTOP_DELAY_MAX_MS
+    assert settings.spin_show_desktop_delay.minimum() == 0
+
+
+@pytest.mark.parametrize("stacking, enabled", [
+    (STACKING_DESKTOP, True),
+    (STACKING_NORMAL, False),
+    (STACKING_TOP, False),
+])
+def test_the_delay_is_only_editable_on_the_desktop_layer(settings, stacking, enabled):
+    settings.combo_stacking.setCurrentIndex(settings.combo_stacking.findData(stacking))
+    assert settings.spin_show_desktop_delay.isEnabled() is enabled
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_the_delay_is_only_shown_on_windows(qapp, monkeypatch, windows):
+    from terminal_widget.ipc import SettingsClient
+    from terminal_widget.settings import __main__ as settings_module
+
+    monkeypatch.setattr(SettingsClient, "start", lambda self, name=None: None)
+    monkeypatch.setattr(settings_module, "is_windows", lambda: windows)
+    window = settings_module.SettingsWindow(Config(), None)
+    try:
+        form = window._behaviour_form
+        assert form.isRowVisible(window.spin_show_desktop_delay) is windows
+        assert form.isRowVisible(window.show_desktop_hint) is windows
+    finally:
+        window.close()
 
 
 # -- One widget, and the button that restarts it -----------------------

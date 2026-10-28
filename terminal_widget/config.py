@@ -28,6 +28,10 @@ OPACITY_WINDOW = "window"  # the whole window fades, glyphs included
 MIN_OPACITY_BACKGROUND = 0
 MIN_OPACITY_WINDOW = 10
 
+#: The Show desktop delay: default and upper bound, in milliseconds.
+SHOW_DESKTOP_DELAY_DEFAULT_MS = 250
+SHOW_DESKTOP_DELAY_MAX_MS = 2000
+
 
 def min_opacity(mode: str) -> int:
     """The lowest opacity that still leaves something on screen in ``mode``."""
@@ -132,6 +136,12 @@ class Config:
     #    normal windows, which is what makes it furniture rather than an app.
     stacking: str = STACKING_DESKTOP
 
+    #: How long after Show desktop (or Win+D) starts the widget waits before
+    #: coming up on top, in milliseconds. Windows only. About the length of
+    #: the minimise animation, so the widget appears as the windows finish
+    #: shrinking rather than over them (docs/show-desktop.md, decision 5).
+    show_desktop_delay_ms: int = SHOW_DESKTOP_DELAY_DEFAULT_MS
+
     def clamped(self) -> "Config":
         """Return a copy with out-of-range values pulled back into range."""
         c = Config(**asdict(self))
@@ -146,6 +156,9 @@ class Config:
         c.opacity = min(100, max(min_opacity(c.opacity_mode), int(c.opacity)))
         c.font_size = min(72, max(5, int(c.font_size)))
         c.scrollback = min(50000, max(0, int(c.scrollback)))
+        c.show_desktop_delay_ms = min(
+            SHOW_DESKTOP_DELAY_MAX_MS, max(0, int(c.show_desktop_delay_ms))
+        )
         # Unlike the opacity floor, nothing derives from this, so it can be
         # checked anywhere in here.
         if c.stacking not in _STACKING_KEYS:

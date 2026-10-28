@@ -48,6 +48,7 @@ from .. import autostart
 from ..config import (
     OPACITY_BACKGROUND,
     OPACITY_WINDOW,
+    SHOW_DESKTOP_DELAY_MAX_MS,
     STACKING_CHOICES,
     STACKING_DESKTOP,
     Config,
@@ -59,7 +60,7 @@ from ..config import (
 )
 from ..ipc import SettingsClient, socket_name
 from ..launch import spawn_widget
-from ..platform_info import DISPLAY_NAME, icon_path, widget_launcher
+from ..platform_info import DISPLAY_NAME, icon_path, is_windows, widget_launcher
 from .theme import muted_color, status_colors
 
 #: How long to wait for a widget we asked for before admitting it is not
@@ -349,6 +350,26 @@ class SettingsWindow(QWidget):
             ),
         )
 
+        self.spin_show_desktop_delay = QSpinBox(
+            minimum=0, maximum=SHOW_DESKTOP_DELAY_MAX_MS, singleStep=50
+        )
+        self.spin_show_desktop_delay.setSuffix(" ms")
+        self.spin_show_desktop_delay.setSpecialValueText("Immediately")
+        self.spin_show_desktop_delay.valueChanged.connect(self._on_ui_changed)
+        form.addRow("Show desktop delay", self.spin_show_desktop_delay)
+        self.show_desktop_hint = self._hint(
+            "How long to wait, after Show desktop or Win+D, before the widget "
+            "comes up on top. Set it to about the length of your minimise "
+            "animation, so the widget appears as the windows finish shrinking."
+        )
+        form.addRow("", self.show_desktop_hint)
+        # Only Windows has a Show desktop the widget has to survive. Whether
+        # the control is enabled follows the layer dropdown, so that part
+        # lives in _refresh_derived.
+        for row in (self.spin_show_desktop_delay, self.show_desktop_hint):
+            form.setRowVisible(row, is_windows())
+        self._behaviour_form = form
+
         self.spin_scrollback = QSpinBox(minimum=0, maximum=50000, singleStep=500)
         self.spin_scrollback.setSuffix(" lines")
         self.spin_scrollback.setSpecialValueText("Off")
@@ -520,6 +541,7 @@ class SettingsWindow(QWidget):
         # the value it is actually going to become.
         index = self.combo_stacking.findData(c.stacking)
         self.combo_stacking.setCurrentIndex(index if index >= 0 else 0)
+        self.spin_show_desktop_delay.setValue(c.show_desktop_delay_ms)
         self._updating = False
         self._refresh_derived()
 
@@ -549,6 +571,7 @@ class SettingsWindow(QWidget):
             scrollback=self.spin_scrollback.value(),
             scroll_top_on_start=self.check_scroll_top.isChecked(),
             stacking=self.combo_stacking.currentData() or STACKING_DESKTOP,
+            show_desktop_delay_ms=self.spin_show_desktop_delay.value(),
         )
 
     def _on_ui_changed(self, *_args) -> None:
@@ -576,6 +599,10 @@ class SettingsWindow(QWidget):
         """Update the labels that are computed rather than entered."""
         self.label_opacity.setText(f"{self.slider_opacity.value()}%")
         self.edit_custom.setEnabled(self.combo_shell.currentData() == "custom")
+        # The delay only means something on the layer Show desktop affects.
+        self.spin_show_desktop_delay.setEnabled(
+            self.combo_stacking.currentData() == STACKING_DESKTOP
+        )
         for button, value in (
             (self.btn_fg, self._config.foreground),
             (self.btn_bg, self._config.background),

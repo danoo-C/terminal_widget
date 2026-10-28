@@ -139,6 +139,12 @@ bring it forward until you click elsewhere, and `bring_to_front()` leans on
 `activateWindow()` rather than `raise_()`. X11 uses `_NET_WM_STATE_BELOW`, which
 the WM does hold, so the two platforms genuinely differ.
 
+> **Correction (2026-10-28, section 4):** "one-shot" was wrong. The same file
+> also rewrites *every* stacking change of a bottom-hint window to
+> `HWND_BOTTOM`, in `handleGeometryChangingMessage`, and refuses to activate
+> it. That silently undid every attempt to keep the widget up through Show
+> desktop. On Windows the desktop layer no longer uses the hint at all.
+
 ### The ctypes fast path, and why it was rejected
 
 A Windows-only `SetWindowPos(HWND_BOTTOM/HWND_TOPMOST, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE)`
@@ -153,6 +159,12 @@ The one thing native code *would* buy is different and larger: re-issuing
 `SetWindowPos(HWND_BOTTOM)` on `WM_ACTIVATE`, to make the desktop layer
 persistent rather than one-shot. Worth considering only if the checklist below
 says the one-shot behaviour is not good enough.
+
+> **Since landed (section 4):** native `SetWindowPos` calls are now in, from a
+> foreground-window hook, including a temporary `HWND_TOPMOST` while the
+> desktop is shown. Show desktop is what made them necessary. The objection
+> above about two sources of truth falls away, because on Windows the desktop
+> layer no longer has a Qt stacking flag.
 
 ### What was verified here
 
@@ -177,12 +189,15 @@ behaviours, and Qt's `render()`/`grab()` cannot even capture the compositing.
 - [ ] Clicking the widget still focuses it and typing still reaches the shell
 - [ ] Config mode still drags and resizes under the Windows WM
 - [ ] Background-only opacity still composites (tool windows are still layered)
-- [ ] **Win+D / Show desktop** — does it hide the widget? Rainmeter survives
-      this by living on the desktop layer; a tool window may not
+- [x] **Win+D / Show desktop** — does it hide the widget? Rainmeter survives
+      this by living on the desktop layer; a tool window may not. *It did hide
+      it (GitHub issue #6); fixed in section 4.*
 - [ ] On `desktop`, the widget starts behind other windows
 - [ ] Whether clicking it raises it, and whether clicking elsewhere puts it
       back. Qt's source says it will raise — decide whether one-shot is good
-      enough or whether the `WM_ACTIVATE` re-sink above is wanted
+      enough or whether the `WM_ACTIVATE` re-sink above is wanted. *Decided in
+      section 4: a click leaves it below whatever covers it, as Rainmeter
+      does. Still to check by hand.*
 - [ ] On `top`, it stays above normal windows
 - [ ] Opening settings lifts it into view; closing puts it back; the restack
       neither moves nor resizes it, and does not flicker badly enough to
@@ -789,3 +804,73 @@ Both new cases are pinned by tests --
 - [ ] A config directory that cannot be written warns and still starts the widget
 - [ ] The settings app finds the widget it was pointed at when both are given
       `--config`
+
+---
+
+## 4. Show desktop hides the widget
+
+**Status:** fixed, and confirmed on the target machine (Windows 11). Reported
+as GitHub issue #6, 2026-10-27; fixed 2026-10-28 on branch
+`issue-6-show-desktop`. Full design and history in `docs/show-desktop.md`.
+
+### What happens
+
+Clicking **Show desktop** at the right end of the taskbar, or pressing Win+D,
+makes the widget disappear until any other window is opened.
+
+### Cause
+
+Two layers of it:
+
+- **Explorer.** On Show desktop it makes its desktop window (`Progman`) the
+  foreground window and, about 50 ms later, lifts it above every normal
+  window. The widget was a normal window at the bottom of the stack, so it
+  ended up underneath.
+- **Qt.** Any fix had to move the widget, and Qt undid every move. For a
+  window with `WindowStaysOnBottomHint`, Qt's Windows plugin rewrites every
+  stacking change to `HWND_BOTTOM` (`handleGeometryChangingMessage`), while
+  `SetWindowPos` still reports success. Two designs failed to this before it
+  was found. The first failure was misread as Explorer winning.
+
+### What landed
+
+`terminal_widget/desktop_layer.py`, doing what Rainmeter does:
+
+- A foreground-window hook. When the desktop comes forward, a 50 ms check
+  watches whether it has risen above the widget. If it has, and the **Show
+  desktop delay** has passed, the widget is made always-on-top. When an app
+  comes forward, it goes back to the bottom. The taskbar, Start and other shell
+  windows come forward *during* Show desktop, so they don't count as apps.
+- On Windows, while that watcher runs, the `desktop` layer has no Qt bottom
+  hint. The watcher keeps the widget at the bottom itself. Without a watcher,
+  for example if Windows refuses the hook, the hint stays as before.
+- A new setting, `show_desktop_delay_ms` (default 250, 0–2000), in the settings
+  app under *Window layer*, on Windows only. It holds the widget back until the
+  minimise animation has finished, instead of popping it up over shrinking
+  windows.
+
+### What was verified
+
+On the target machine, through a debug launcher that logs every decision:
+
+- Win+D and the Show desktop corner leave the widget visible, coming up after
+  the delay.
+- The desktop window is `Progman` on this build, the only one of 15 candidates
+  holding `SHELLDLL_DefView`.
+- A corner click brings the taskbar forward first, then `Progman`.
+
+On Linux: 432 tests pass, `pyright` is clean.
+
+### To verify on Windows
+
+The rest of the checklist in `docs/show-desktop.md` (*Testing*), notably:
+
+- [ ] After Show desktop, clicking an app or Alt+Tab puts the widget back behind
+- [ ] After Show desktop, the Start menu, the tray menu and typing into the
+      widget all leave it visible
+- [ ] Clicking the wallpaper with apps open never lifts it over them
+- [ ] At startup it sits behind other windows
+- [ ] Tray → Show brings it forward until an app is used
+- [ ] Opening settings during Show desktop leaves nothing always-on-top
+- [ ] A fullscreen game or video is never covered
+- [ ] Show desktop still works after restarting `explorer.exe`
