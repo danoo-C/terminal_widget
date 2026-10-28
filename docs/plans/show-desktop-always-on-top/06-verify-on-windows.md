@@ -1,4 +1,4 @@
-# Step 4: Verify on Windows and close out
+# Step 6: Verify on Windows and close out
 
 **Goal:** prove the second design on the target machine with the debug
 launcher, write down what was found, and ship.
@@ -8,25 +8,24 @@ launcher, write down what was found, and ship.
 
 ---
 
-## 4.1 Update the debug launcher
+## 6.1 The debug launcher
 
-Round one's `run_debug.py` wraps `Win32Shell` methods to log them. Update it
-for the new surface:
+Already updated during round two (`run_debug.py` in the session scratchpad).
+It logs `classify` with `APP` / `SHELL`, each change in `desktop_above`, every
+`SetWindowPos` with whether it succeeded, and afterwards whether the widget is
+topmost and above or below the desktop. It also runs an independent 50 ms
+poller.
 
-- wrap `raise_topmost` and `place_at_bottom`: log the call, whether
-  `SetWindowPos` succeeded, and afterwards whether the widget is **topmost**
-  and **above or below the desktop**, at once and again 150 ms and 600 ms
-  later;
-- wrap `desktop_above`: log each tick's answer, but only when it changes, so a
-  2 s watch is one or two lines, not 40;
-- keep logging `classify`, now with `APP` / `SHELL`. Any `SHELL` that should be
-  `APP`, or the reverse, is a gap in `SHELL_CLASSES` or `_is_app_window`;
-- keep the independent 50 ms poller, and add whether the widget is topmost.
+Still to do, after steps 4 and 5:
 
-Run it the same way as round one: the installed venv's `python.exe`, the
-checkout's path as the argument, daily widget quit first.
+- remove the `nohint` experiment (step 4.5);
+- log the delay each watch started with, and the tick it raised on. Then the
+  setting can be tuned against the animation from the log, not just by eye.
 
-## 4.2 Hand checklist
+Run it as before: the installed venv's `python.exe`, the checkout's path as
+the argument, daily widget quit first.
+
+## 6.2 Hand checklist
 
 The checklist in `docs/show-desktop.md` (*Testing*), in this order:
 
@@ -44,12 +43,16 @@ The checklist in `docs/show-desktop.md` (*Testing*), in this order:
     `desktop`
 12. A fullscreen video or game, Win+D, then back to it
 13. Restart `explorer.exe`, then 1 again
-14. Note how long the widget blinks out on Show desktop, if at all
+14. Tune the Show desktop delay in settings until the widget appears as the
+    minimise animation ends; note the value
+15. Win+D, then Win+D again within the delay: the widget never jumps on top
+16. Start the widget: it starts behind other windows
+17. Change the delay in settings, close settings, Win+D: the new delay applies
 
 For each item, paste the launcher's log lines. The design's prediction for
 each is in its tables, so a mismatch shows which row is wrong.
 
-## 4.3 If something fails
+## 6.3 If something fails
 
 - **Still hidden on Show desktop, and the log shows `raise` succeeded with the
   widget topmost:** something other than `Progman` is covering it. Log every
@@ -65,7 +68,7 @@ each is in its tables, so a mismatch shows which row is wrong.
 - **Anything raises the widget over a fullscreen app:** stop. That breaks
   decision 3's premise and needs a design change, not a tweak.
 
-## 4.4 Write it down
+## 6.4 Write it down
 
 - **`issues.md`**: add **section 4, "Show desktop hides the widget"**, in the
   file's usual shape. Say plainly that the first design failed and why, link
@@ -74,13 +77,16 @@ each is in its tables, so a mismatch shows which row is wrong.
   section 4. Mark the one-shot question (lines 182-184) as answered by
   decision 1. Add one sentence to the "ctypes fast path" paragraph (lines
   142-155): native `SetWindowPos` calls have now landed, including a temporary
-  `HWND_TOPMOST`, for the reasons in decision 3.
+  `HWND_TOPMOST`, for the reasons in decision 3. Also correct the section's
+  claim (lines 133-140) that `WindowStaysOnBottomHint` is "one-shot on
+  Windows". Qt re-applies it on every stacking change, which is why the
+  desktop layer drops it on Windows (decision 4).
 - **`README.md`**: one sentence in the layering paragraph saying the widget
   stays up through Show desktop on Windows.
 - **`docs/show-desktop.md`**: **Status** becomes "landed", with the date; tick
   the checklist.
 
-## 4.5 Ship
+## 6.5 Ship
 
 - Push the branch, and open a PR to `main` with `Fixes #6` in the body.
 - After merge, reply on issue #6 in Slovak, asking the reporter to update and

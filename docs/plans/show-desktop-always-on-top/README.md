@@ -30,12 +30,23 @@ step 2.
 
 | # | Plan | Touches | Can be checked on Linux |
 | --- | --- | --- | --- |
-| 1 | [Decision logic](01-decision-logic.md) | `desktop_layer.py` (pure part), `tests/test_desktop_layer.py`, `tests/conftest.py` | fully |
-| 2 | [Win32 adapter](02-win32-adapter.md) | `desktop_layer.py` (Windows part and `create()`), its tests | the faked parts |
-| 3 | [Window integration check](03-window-integration.md) | `tests/test_window.py`, maybe `window.py` | fully, with fakes |
-| 4 | [Verify on Windows and close out](04-verify-on-windows.md) | the debug launcher, `issues.md`, `README.md`, the PR | no, needs the real desktop |
+| # | Plan | Touches | Can be checked on Linux | State |
+| --- | --- | --- | --- | --- |
+| 1 | [Decision logic](01-decision-logic.md) | `desktop_layer.py` (pure part), tests | fully | built, `a618134` |
+| 2 | [Win32 adapter](02-win32-adapter.md) | `desktop_layer.py` (Windows part), tests | the faked parts | built, `a618134` |
+| 3 | [Window integration check](03-window-integration.md) | `tests/test_window.py` | fully, with fakes | built, `a618134` |
+| 4 | [No Qt bottom hint on Windows](04-no-qt-bottom-hint.md) | `desktop_layer.py`, `window.py`, tests | fully, with fakes | to do |
+| 5 | [Show desktop delay setting](05-show-desktop-delay.md) | `desktop_layer.py`, `config.py`, `window.py`, settings app, tests | fully | to do |
+| 6 | [Verify on Windows and close out](06-verify-on-windows.md) | the debug launcher, `issues.md`, `README.md`, the PR | no, needs the real desktop | to do |
 
 Commit after each step, with the full suite and `pyright` passing.
+
+**Steps 4 and 5 were added after steps 1–3 failed on the target machine.** Qt
+rewrites every stacking change of a window with `WindowStaysOnBottomHint` to
+`HWND_BOTTOM`, which silently undid every raise. With the hint removed (an
+experiment in the debug launcher), the design worked, and the user asked for a
+delay so the widget doesn't come up before the minimise animation ends. See
+*Cause* and *History* in the design doc.
 
 ## The shape of it
 
@@ -64,6 +75,8 @@ Commit after each step, with the full suite and `pyright` passing.
 
 ## Ground rules
 
+- On Windows, while a watcher exists, the `desktop` layer never carries Qt's
+  `WindowStaysOnBottomHint` (step 4). Without a watcher it always does.
 - `HWND_TOPMOST` is used in exactly one place, `raise_topmost()`.
   `HWND_NOTOPMOST` is never used; `HWND_BOTTOM` ends a raise.
 - The ticker runs only while watching. No background polling.
