@@ -19,11 +19,14 @@ behind the :class:`Shell` protocol.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum, auto
-from typing import Protocol
+from typing import Any, Protocol
+
+from .platform_info import is_windows
 
 
 class Kind(Enum):
@@ -215,3 +218,190 @@ class DesktopLayer:
         if self._installed:
             self._installed = False
             self._shell.uninstall()
+
+
+# -- Windows ------------------------------------------------------------
+
+EVENT_SYSTEM_FOREGROUND = 0x0003
+WINEVENT_OUTOFCONTEXT = 0x0000
+GW_HWNDPREV = 3
+HWND_TOP = 0
+HWND_BOTTOM = 1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+#: Every placement keeps the widget's size, position and focus: only its
+#: place in the stack changes.
+_PLACE_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+
+# HWND_TOPMOST and HWND_NOTOPMOST are deliberately absent. Leaving the normal
+# window band would make the real window style disagree with Qt's
+# windowFlags() -- the reason a ctypes restack was turned down before
+# (issues.md, "The ctypes fast path") -- and it could put the widget over a
+# fullscreen game.
+
+#: Class names are capped at 256 characters.
+_CLASS_NAME_LEN = 256
+
+
+class Win32Shell:
+    """The real :class:`Shell`: ``user32`` through ctypes, and nothing else.
+
+    Thin on purpose. It reports what Windows says and does what it is told;
+    every decision lives in :func:`decide`, where it can be tested.
+
+    The hook is out-of-context, so Windows delivers events through the
+    message queue of the thread that installed it. That is Qt's GUI thread,
+    pumped by ``app.exec()``, so the callback runs between Qt events and needs
+    no locking.
+    """
+
+    def __init__(self) -> None:
+        self._user32, self._proc_type = _bind_user32()
+        self._hook: int | None = None
+        # The ctypes wrapper around the callback. It must outlive the hook:
+        # if it were collected while hooked, Windows would call freed memory
+        # and take the process down.
+        self._proc: Any = None
+        self._pid = os.getpid()
+
+    def install(self, callback: Callable[[int], None]) -> bool:
+        def on_event(hook, event, hwnd, id_object, id_child, thread, time_ms):
+            callback(int(hwnd or 0))
+
+        proc = self._proc_type(on_event)
+        # No WINEVENT_SKIPOWNPROCESS: the widget's own foreground events are
+        # what tell a click from a reveal.
+        hook = self._user32.SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            proc,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+        if not hook:
+            return False
+        self._hook, self._proc = hook, proc
+        return True
+
+    def uninstall(self) -> None:
+        if self._hook is not None:
+            self._user32.UnhookWinEvent(self._hook)
+        # Only now, with no hook left to call it.
+        self._hook = self._proc = None
+
+    def foreground(self) -> int:
+        return int(self._user32.GetForegroundWindow() or 0)
+
+    def classify(self, hwnd: int, widget: int) -> Kind:
+        if not hwnd:
+            return Kind.NONE
+        if hwnd == widget:
+            return Kind.SELF
+        if self._process_of(hwnd) == self._pid:
+            return Kind.OWN
+        has_defview = bool(
+            self._user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
+        )
+        if is_desktop_class(self._class_name(hwnd), has_defview):
+            return Kind.DESKTOP
+        return Kind.OTHER
+
+    def place_above(self, widget: int, desktop: int) -> None:
+        # Inserting after the window just above the desktop puts the widget
+        # directly on top of it. During Show desktop nothing is above it, so
+        # the widget goes to the top; after a click on the wallpaper the
+        # desktop is still at the bottom, and so the widget stays behind
+        # every app.
+        prev = int(self._user32.GetWindow(desktop, GW_HWNDPREV) or 0)
+        if prev == widget:
+            return
+        self._set_pos(widget, prev or HWND_TOP)
+
+    def place_at_bottom(self, widget: int) -> None:
+        self._set_pos(widget, HWND_BOTTOM)
+
+    def _set_pos(self, widget: int, insert_after: int) -> None:
+        # A failure is not reported: the next foreground change places the
+        # widget again, and shouting from inside a hook helps nobody.
+        self._user32.SetWindowPos(widget, insert_after, 0, 0, 0, 0, _PLACE_FLAGS)
+
+    def _process_of(self, hwnd: int) -> int:
+        import ctypes
+        from ctypes import wintypes
+
+        pid = wintypes.DWORD()
+        self._user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value
+
+    def _class_name(self, hwnd: int) -> str:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(_CLASS_NAME_LEN)
+        self._user32.GetClassNameW(hwnd, buf, _CLASS_NAME_LEN)
+        return buf.value
+
+
+def _bind_user32() -> tuple[Any, Any]:
+    """``user32`` with every function this module uses declared.
+
+    Declared in full rather than called bare: ctypes' default return type is
+    a C ``int``, which silently truncates a 64-bit window handle.
+    """
+    if sys.platform != "win32":
+        raise OSError("user32 exists only on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32")
+    hwnd, dword, uint = wintypes.HWND, wintypes.DWORD, wintypes.UINT
+    hook_handle = wintypes.HANDLE
+
+    proc_type = ctypes.WINFUNCTYPE(
+        None, hook_handle, dword, hwnd, wintypes.LONG, wintypes.LONG, dword, dword
+    )
+
+    def declare(name: str, restype: Any, *argtypes: Any) -> None:
+        fn = getattr(user32, name)
+        fn.restype = restype
+        fn.argtypes = list(argtypes)
+
+    declare(
+        "SetWinEventHook",
+        hook_handle,
+        uint, uint, wintypes.HMODULE, proc_type, dword, dword, uint,
+    )
+    declare("UnhookWinEvent", wintypes.BOOL, hook_handle)
+    declare("GetForegroundWindow", hwnd)
+    declare("GetClassNameW", ctypes.c_int, hwnd, wintypes.LPWSTR, ctypes.c_int)
+    declare("FindWindowExW", hwnd, hwnd, hwnd, wintypes.LPCWSTR, wintypes.LPCWSTR)
+    declare("GetWindowThreadProcessId", dword, hwnd, ctypes.POINTER(dword))
+    declare("GetWindow", hwnd, hwnd, uint)
+    declare(
+        "SetWindowPos",
+        wintypes.BOOL,
+        hwnd, hwnd, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, uint,
+    )
+    return user32, proc_type
+
+
+def create(widget_hwnd: Callable[[], int]) -> DesktopLayer | None:
+    """The desktop layer for this platform, or None where none is needed.
+
+    Only Windows gets one: there the bottom hint is a single ``SetWindowPos``
+    that nothing maintains. X11 has ``_NET_WM_STATE_BELOW``, which the window
+    manager holds, and Show desktop on Linux is out of scope for issue #6.
+    A binding failure also means None, so the widget behaves as it did
+    before this existed rather than not starting.
+    """
+    if not is_windows():
+        return None
+    try:
+        shell = Win32Shell()
+    except OSError as exc:
+        print(f"terminal-widget: desktop layer unavailable: {exc}", file=sys.stderr)
+        return None
+    return DesktopLayer(shell, widget_hwnd)

@@ -116,3 +116,20 @@ Everything else in this step is checked by hand in step 4.
 The full suite and `pyright` pass on Linux, and a Python REPL on Windows can run
 `Win32Shell().classify(Win32Shell().foreground(), 0)` and get a sensible `Kind`
 for the window that's in front.
+
+## Result (2026-10-28)
+
+Done. A read-only probe with 64-bit Windows Python on the target machine
+moved no windows. It found:
+
+- **`Progman` is the desktop on this build.** It's the only candidate holding
+  `SHELLDLL_DefView`, so it's the newer (24H2-style) layout. All 14 `WorkerW`
+  windows classified as `OTHER`, which confirms the DefView check is needed:
+  the class name alone would have matched all 15.
+- The foreground window at the time (a browser, `Chrome_WidgetWin_1`) came out
+  as `OTHER`; NULL came out as `NONE`; the widget's own handle as `SELF`.
+- `SetWinEventHook` installed and `UnhookWinEvent` removed cleanly.
+- `create()` returned a real `DesktopLayer`.
+
+Still open, for step 4: which window actually takes the foreground during
+Win+D. Given the above, `Progman` is expected.

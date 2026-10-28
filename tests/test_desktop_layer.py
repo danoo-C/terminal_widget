@@ -5,14 +5,19 @@ FakeShell from conftest. What Windows actually does is checked by hand,
 per docs/plans/show-desktop/04-verify-on-windows.md.
 """
 
+import sys
+
 import pytest
 
+from terminal_widget import desktop_layer
 from terminal_widget.desktop_layer import (
     Action,
     DesktopLayer,
     Foreground,
     Kind,
     State,
+    Win32Shell,
+    create,
     decide,
     is_desktop_class,
 )
@@ -258,3 +263,34 @@ def test_close_twice_is_harmless(layer, shell):
 def test_close_without_ever_enabling_is_harmless(layer, shell):
     layer.close()
     assert shell.uninstalls == 0
+
+
+# -- create() and the Windows binding ------------------------------------
+#
+# Win32Shell itself only runs on Windows and is checked by hand there. What
+# can be checked anywhere is that nothing Windows-only runs elsewhere, and
+# that a binding failure degrades to today's behaviour instead of crashing.
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="checks the non-Windows path")
+def test_no_layer_is_created_off_windows():
+    assert create(lambda: WIDGET) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user32 exists there")
+def test_the_win32_shell_refuses_to_bind_off_windows():
+    with pytest.raises(OSError):
+        Win32Shell()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="user32 would bind there")
+def test_a_failed_binding_means_no_layer_rather_than_a_crash(monkeypatch, capsys):
+    monkeypatch.setattr(desktop_layer, "is_windows", lambda: True)
+    assert create(lambda: WIDGET) is None
+    assert "desktop layer unavailable" in capsys.readouterr().err
+
+
+def test_no_topmost_constant_exists():
+    """The layer must never leave the normal window band (see the module)."""
+    assert not hasattr(desktop_layer, "HWND_TOPMOST")
+    assert not hasattr(desktop_layer, "HWND_NOTOPMOST")
