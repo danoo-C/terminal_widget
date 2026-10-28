@@ -230,6 +230,8 @@ HWND_BOTTOM = 1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 #: Every placement keeps the widget's size, position and focus: only its
 #: place in the stack changes.
 _PLACE_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
@@ -311,14 +313,22 @@ class Win32Shell:
 
     def place_above(self, widget: int, desktop: int) -> None:
         # Inserting after the window just above the desktop puts the widget
-        # directly on top of it. During Show desktop nothing is above it, so
-        # the widget goes to the top; after a click on the wallpaper the
-        # desktop is still at the bottom, and so the widget stays behind
-        # every app.
+        # directly on top of it. After a click on the wallpaper the desktop
+        # is still at the bottom, so the widget stays behind every app.
         prev = int(self._user32.GetWindow(desktop, GW_HWNDPREV) or 0)
         if prev == widget:
             return
+        if prev and self._is_topmost(prev):
+            # Topmost windows always sit above every normal one, so a topmost
+            # window directly above the desktop means no normal window is:
+            # Show desktop, where the taskbar is what sits above it. Going in
+            # after a topmost window would make the widget topmost too, so
+            # take the top of the normal band instead.
+            prev = 0
         self._set_pos(widget, prev or HWND_TOP)
+
+    def _is_topmost(self, hwnd: int) -> bool:
+        return bool(self._user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 
     def place_at_bottom(self, widget: int) -> None:
         self._set_pos(widget, HWND_BOTTOM)
@@ -380,6 +390,10 @@ def _bind_user32() -> tuple[Any, Any]:
     declare("FindWindowExW", hwnd, hwnd, hwnd, wintypes.LPCWSTR, wintypes.LPCWSTR)
     declare("GetWindowThreadProcessId", dword, hwnd, ctypes.POINTER(dword))
     declare("GetWindow", hwnd, hwnd, uint)
+    if not hasattr(user32, "GetWindowLongPtrW"):
+        # 32-bit user32 has no Ptr variant; there it is a macro for this.
+        setattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    declare("GetWindowLongPtrW", ctypes.c_ssize_t, hwnd, ctypes.c_int)
     declare(
         "SetWindowPos",
         wintypes.BOOL,

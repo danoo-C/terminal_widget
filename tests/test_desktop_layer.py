@@ -294,3 +294,74 @@ def test_no_topmost_constant_exists():
     """The layer must never leave the normal window band (see the module)."""
     assert not hasattr(desktop_layer, "HWND_TOPMOST")
     assert not hasattr(desktop_layer, "HWND_NOTOPMOST")
+
+
+# -- Win32Shell placement, against a fake user32 ---------------------------
+#
+# The z-order rules are the part of the Windows side most worth pinning:
+# a probe on the target machine showed that during Show desktop the window
+# directly above the desktop is a topmost one (the taskbar), and inserting
+# after it would have made the widget topmost too.
+
+TASKBAR, NORMAL = 0x500, 0x600
+FLAGS = (desktop_layer.SWP_NOMOVE | desktop_layer.SWP_NOSIZE
+         | desktop_layer.SWP_NOACTIVATE)
+
+
+class FakeUser32:
+    def __init__(self, above_desktop=0, topmost=()):
+        self.above_desktop = above_desktop
+        self.topmost = set(topmost)
+        self.moves = []
+
+    def GetWindow(self, hwnd, cmd):  # noqa: N802
+        assert (hwnd, cmd) == (DESKTOP, desktop_layer.GW_HWNDPREV)
+        return self.above_desktop or None
+
+    def GetWindowLongPtrW(self, hwnd, index):  # noqa: N802
+        assert index == desktop_layer.GWL_EXSTYLE
+        return desktop_layer.WS_EX_TOPMOST if hwnd in self.topmost else 0
+
+    def SetWindowPos(self, hwnd, after, x, y, cx, cy, flags):  # noqa: N802
+        self.moves.append((hwnd, after, flags))
+        return 1
+
+
+def fake_win32(**kwargs):
+    shell = Win32Shell.__new__(Win32Shell)  # skip binding the real user32
+    shell._user32 = FakeUser32(**kwargs)
+    return shell, shell._user32
+
+
+def test_above_the_desktop_goes_in_after_the_normal_window_over_it():
+    """Clicking the wallpaper: the desktop is still under the apps, and the
+    widget goes directly on top of it -- still under the apps."""
+    shell, u = fake_win32(above_desktop=NORMAL)
+    shell.place_above(WIDGET, DESKTOP)
+    assert u.moves == [(WIDGET, NORMAL, FLAGS)]
+
+
+def test_above_the_desktop_never_goes_in_after_a_topmost_window():
+    """Show desktop: only the taskbar is above the desktop. Going in after
+    it would make the widget topmost; the top of the normal band is right."""
+    shell, u = fake_win32(above_desktop=TASKBAR, topmost=[TASKBAR])
+    shell.place_above(WIDGET, DESKTOP)
+    assert u.moves == [(WIDGET, desktop_layer.HWND_TOP, FLAGS)]
+
+
+def test_above_the_desktop_with_nothing_over_it_goes_to_the_top():
+    shell, u = fake_win32(above_desktop=0)
+    shell.place_above(WIDGET, DESKTOP)
+    assert u.moves == [(WIDGET, desktop_layer.HWND_TOP, FLAGS)]
+
+
+def test_already_directly_above_the_desktop_is_left_alone():
+    shell, u = fake_win32(above_desktop=WIDGET)
+    shell.place_above(WIDGET, DESKTOP)
+    assert u.moves == []
+
+
+def test_to_the_bottom_is_hwnd_bottom_without_activating():
+    shell, u = fake_win32()
+    shell.place_at_bottom(WIDGET)
+    assert u.moves == [(WIDGET, desktop_layer.HWND_BOTTOM, FLAGS)]

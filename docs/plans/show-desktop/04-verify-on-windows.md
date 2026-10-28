@@ -63,6 +63,27 @@ starts from a known state. Tick them in `docs/show-desktop.md` as they pass.
 - [ ] Quit from the tray: no error output, no hang. This checks that the hook
       is uninstalled.
 
+## Probe results so far (2026-10-28)
+
+A read-only probe on the target machine logged foreground changes and the
+window stack while Win+D and the Show desktop corner were used:
+
+- **Every time the desktop came to cover everything, `Progman` had become the
+  foreground window just before.** For the corner, the taskbar
+  (`Shell_TrayWnd`) comes forward first, then `Progman`. The hook's trigger is
+  the right one.
+- **In that state the window directly above `Progman` is always-on-top.** The
+  first `place_above` would have inserted the widget after it and made the
+  widget always-on-top. It now uses `HWND_TOP` instead (step 2 plan, 2.3).
+- **Rainmeter's skins (`RainmeterMeterWindow`) normally sit directly above
+  `Progman`**, where this widget belongs. While the desktop is uncovered they
+  no longer count as covering it, which suggests Rainmeter makes them
+  always-on-top for that moment.
+- **The installed widget (`Qt6112QWindowToolSaveBits`) also sits directly
+  above `Progman` normally,** and drops out of sight on Show desktop: the bug,
+  observed.
+- Clicking the empty wallpaper wasn't captured. It's still on the checklist.
+
 ## 4.3 If something fails
 
 - **The widget still disappears on Win+D:** first check what `classify` returns

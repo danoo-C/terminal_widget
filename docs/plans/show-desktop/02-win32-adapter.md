@@ -76,10 +76,14 @@ can't creep in later (see the ground rules in the README).
 
   A 256-character buffer for the class name; class names are capped at 256.
 - **`place_above(widget, desktop)`**: `prev = GetWindow(desktop, GW_HWNDPREV)`.
-  If `prev` is the widget itself it's already in place, so return. Otherwise
-  `SetWindowPos(widget, prev or HWND_TOP, 0, 0, 0, 0, FLAGS)`. `GetWindow`
-  returning NULL means the desktop is at the top of the stack (Show desktop),
-  and `HWND_TOP` puts the widget above it.
+  If `prev` is the widget itself it's already in place, so return. If `prev` is
+  always-on-top (`WS_EX_TOPMOST` in `GetWindowLongPtrW(prev, GWL_EXSTYLE)`),
+  treat it as NULL. Then `SetWindowPos(widget, prev or HWND_TOP, 0, 0, 0, 0,
+  FLAGS)`. During Show desktop the window above the desktop is the taskbar,
+  which is always-on-top. Inserting after it would make the widget
+  always-on-top too, so the widget takes `HWND_TOP` instead, the top of the
+  normal band. (This rule was added after the step 4 probe; the first version
+  inserted after any `prev`.)
 - **`place_at_bottom(widget)`**: `SetWindowPos(widget, HWND_BOTTOM, 0, 0, 0, 0,
   FLAGS)`.
 
