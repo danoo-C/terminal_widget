@@ -123,8 +123,10 @@ Table tests for `decide()`, one per row, plus these sequences:
 
 - Show desktop → click widget → stays `ABOVE_DESKTOP`; → open an app →
   `TO_BOTTOM`, state cleared.
-- reveal → `SELF` → `LEAVE`; → `OTHER` → `TO_BOTTOM` and `revealed` cleared; →
-  `SELF` again → `TO_BOTTOM` (the reveal lasted exactly one use).
+- reveal → `SELF` → `LEAVE`; → `SELF` again → still `LEAVE` (one reveal can
+  produce more than one foreground event for the widget); → `OTHER` →
+  `TO_BOTTOM` and `revealed` cleared; → `SELF` → `TO_BOTTOM` (the reveal is
+  over).
 - Show desktop → tray menu (`OWN`) → `LEAVE`, `desktop` still remembered.
 - `NONE` in the middle of any sequence changes nothing.
 

@@ -9,6 +9,68 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 
+class FakeShell:
+    """A stand-in for the Win32 side of the desktop layer.
+
+    ``kinds`` says what ``classify`` reports for each hwnd (anything unlisted
+    is OTHER, and the widget's own hwnd is SELF); ``calls`` records every
+    placement in order, as ``("above", widget, desktop)`` or
+    ``("bottom", widget)``.
+    """
+
+    def __init__(self, fg: int = 0, install_ok: bool = True) -> None:
+        from terminal_widget.desktop_layer import Kind
+
+        self.fg = fg
+        self.install_ok = install_ok
+        self.kinds: dict[int, Kind] = {0: Kind.NONE}
+        self.calls: list[tuple] = []
+        self.callback = None
+        self.installs = 0
+        self.uninstalls = 0
+
+    def install(self, callback) -> bool:
+        self.installs += 1
+        if self.install_ok:
+            self.callback = callback
+        return self.install_ok
+
+    def uninstall(self) -> None:
+        self.uninstalls += 1
+        self.callback = None
+
+    @property
+    def installed(self) -> bool:
+        return self.callback is not None
+
+    def foreground(self) -> int:
+        return self.fg
+
+    def classify(self, hwnd: int, widget: int):
+        from terminal_widget.desktop_layer import Kind
+
+        if hwnd and hwnd == widget:
+            return Kind.SELF
+        return self.kinds.get(hwnd, Kind.OTHER)
+
+    def place_above(self, widget: int, desktop: int) -> None:
+        self.calls.append(("above", widget, desktop))
+
+    def place_at_bottom(self, widget: int) -> None:
+        self.calls.append(("bottom", widget))
+
+    def bring(self, hwnd: int) -> None:
+        """Simulate ``hwnd`` coming to the foreground."""
+        self.fg = hwnd
+        if self.callback is not None:
+            self.callback(hwnd)
+
+
+@pytest.fixture
+def fake_shell():
+    return FakeShell()
+
+
 @pytest.fixture(scope="session")
 def qapp():
     app = QApplication.instance() or QApplication([])
