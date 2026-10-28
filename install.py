@@ -124,7 +124,7 @@ class Options:
 
 @dataclass
 class Manifest:
-    version: str = "0.2.0"
+    version: str = "1.0.2"
     paths: list[str] = field(default_factory=list)
     registry: list[dict] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
