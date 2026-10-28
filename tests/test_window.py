@@ -633,8 +633,11 @@ DESKTOP_HWND = 0x200
 
 
 @pytest.fixture
-def layered(qapp, monkeypatch, fake_shell):
-    """A shown widget on the desktop layer, with a watcher over a fake shell."""
+def layered(qapp, monkeypatch, fake_shell, ticker_factory):
+    """A shown widget on the desktop layer, with a watcher over a fake shell.
+
+    Yields the window, the layer, the fake shell and the fake watch ticker.
+    """
     from terminal_widget import window as window_module
     from terminal_widget.desktop_layer import DesktopLayer, Kind
     from terminal_widget.window import WidgetWindow
@@ -643,12 +646,22 @@ def layered(qapp, monkeypatch, fake_shell):
     monkeypatch.setattr(
         window_module,
         "create_desktop_layer",
-        lambda hwnd: DesktopLayer(fake_shell, hwnd),
+        lambda hwnd: DesktopLayer(fake_shell, hwnd, ticker_factory),
     )
     w = WidgetWindow(Config(x=100, y=100, width=640, height=320))
     w.show()
-    yield w, w._desktop_layer, fake_shell
+    yield w, w._desktop_layer, fake_shell, ticker_factory.ticker
     w.close()
+
+
+def raised(layered):
+    """Put the fake through Show desktop until the widget is raised."""
+    w, layer, shell, _ = layered
+    shell.above = True
+    shell.bring(DESKTOP_HWND)
+    assert layer.state.raised
+    shell.calls.clear()
+    return int(w.winId())
 
 
 def test_off_windows_there_is_no_watcher(window):
@@ -659,23 +672,24 @@ def test_off_windows_there_is_no_watcher(window):
 
 
 def test_shown_on_the_desktop_layer_the_watcher_is_on(layered):
-    _, layer, shell = layered
+    _, layer, shell, _ = layered
     assert layer.enabled
     assert shell.installs == 1
 
 
-def test_switching_on_places_the_widget_at_once(layered):
+def test_switching_on_looks_at_once(layered):
     """It acts on what is in front now, without waiting for the next event."""
-    w, _, shell = layered
+    w, _, shell, ticker = layered
     assert shell.calls == []  # nothing in front yet, so nothing to do
     shell.fg = DESKTOP_HWND
     w.hide()
     w.show()
-    assert shell.calls == [("above", int(w.winId()), DESKTOP_HWND)]
+    assert shell.asked == [(int(w.winId()), DESKTOP_HWND)]
+    assert ticker.running
 
 
 def test_config_mode_switches_it_off_and_back_on(layered):
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     w.set_config_mode(True)
     assert not layer.enabled
     w.set_config_mode(False)
@@ -684,7 +698,7 @@ def test_config_mode_switches_it_off_and_back_on(layered):
 
 @pytest.mark.parametrize("stacking", [STACKING_NORMAL, STACKING_TOP])
 def test_the_other_layers_switch_it_off(layered, stacking):
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     w.apply_config(replace_stacking(w, stacking))
     assert not layer.enabled
     w.apply_config(replace_stacking(w, STACKING_DESKTOP))
@@ -692,7 +706,7 @@ def test_the_other_layers_switch_it_off(layered, stacking):
 
 
 def test_a_layer_change_in_config_mode_leaves_it_off_until_the_end(layered):
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     w.set_config_mode(True)
     w.apply_config(replace_stacking(w, STACKING_NORMAL))
     w.apply_config(replace_stacking(w, STACKING_DESKTOP))
@@ -702,7 +716,7 @@ def test_a_layer_change_in_config_mode_leaves_it_off_until_the_end(layered):
 
 
 def test_it_is_off_while_the_native_window_is_replaced(layered, monkeypatch):
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     seen = []
     original = w.setWindowFlags
 
@@ -716,13 +730,13 @@ def test_it_is_off_while_the_native_window_is_replaced(layered, monkeypatch):
 
 
 def test_hidden_it_is_off(layered):
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     w.hide()
     assert not layer.enabled
 
 
 def test_bring_to_front_marks_a_reveal(layered):
-    w, layer, shell = layered
+    w, layer, shell, _ = layered
     w.bring_to_front()
     assert layer.state.revealed
     shell.calls.clear()
@@ -733,23 +747,23 @@ def test_bring_to_front_marks_a_reveal(layered):
 def test_a_reveal_from_hidden_survives_the_show(layered):
     """show() switches the watcher on, which starts from a clean state; the
     reveal has to land after that or it is wiped."""
-    w, layer, _ = layered
+    w, layer, _, _ = layered
     w.hide()
     w.bring_to_front()
     assert layer.enabled and layer.state.revealed
 
 
 def test_foreground_events_move_the_current_native_window(layered):
-    w, _, shell = layered
-    shell.calls.clear()
+    w, _, shell, _ = layered
+    shell.above = True
     shell.bring(DESKTOP_HWND)
     shell.bring(APP_HWND)
     hwnd = int(w.winId())
-    assert shell.calls == [("above", hwnd, DESKTOP_HWND), ("bottom", hwnd)]
+    assert shell.calls == [("raise", hwnd), ("bottom", hwnd)]
 
 
 def test_events_after_a_restack_use_the_new_handle(layered):
-    w, _, shell = layered
+    w, _, shell, _ = layered
     w.set_config_mode(True)
     w.set_config_mode(False)
     shell.calls.clear()
@@ -758,9 +772,89 @@ def test_events_after_a_restack_use_the_new_handle(layered):
 
 
 def test_closing_unhooks_before_announcing_it(layered):
-    w, _, shell = layered
+    w, _, shell, _ = layered
     installed_when_closed = []
     w.closed.connect(lambda: installed_when_closed.append(shell.installed))
     w.close()
     assert installed_when_closed == [False]
     assert shell.uninstalls == 1
+
+
+# -- Ending a raise from the window's side --------------------------------
+#
+# Every way the window stops the watcher must also undo always-on-top, so
+# Windows and Qt's flags agree again (plan 03, section 3.1).
+
+
+def test_config_mode_while_raised_lowers_before_the_restack(layered, monkeypatch):
+    w, layer, shell, _ = layered
+    hwnd = raised(layered)
+    calls_at_restack = []
+    original = w.setWindowFlags
+
+    def spy(flags):
+        calls_at_restack.append(list(shell.calls))
+        original(flags)
+
+    monkeypatch.setattr(w, "setWindowFlags", spy)
+    w.set_config_mode(True)
+    assert calls_at_restack == [[("bottom", hwnd)]]
+    assert not layer.enabled and not layer.state.raised
+
+
+def test_leaving_config_mode_after_a_raise_starts_clean(layered):
+    w, layer, shell, _ = layered
+    raised(layered)
+    shell.above = False
+    shell.fg = APP_HWND
+    w.set_config_mode(True)
+    w.set_config_mode(False)
+    assert layer.enabled
+    assert not layer.state.raised
+    assert shell.calls[-1] == ("bottom", int(w.winId()))
+
+
+def test_a_layer_change_to_top_while_raised_lowers_first(layered):
+    w, layer, shell, _ = layered
+    hwnd = raised(layered)
+    w.apply_config(replace_stacking(w, STACKING_TOP))
+    assert shell.calls == [("bottom", hwnd)]
+    assert not layer.enabled
+
+
+def test_hiding_while_raised_lowers(layered):
+    w, _, shell, _ = layered
+    hwnd = raised(layered)
+    w.hide()
+    assert shell.calls == [("bottom", hwnd)]
+
+
+def test_closing_while_raised_lowers_then_unhooks_then_announces(layered):
+    w, _, shell, _ = layered
+    hwnd = raised(layered)
+    seen_at_close = []
+    w.closed.connect(
+        lambda: seen_at_close.append((list(shell.calls), shell.installed))
+    )
+    w.close()
+    assert seen_at_close == [([("bottom", hwnd)], False)]
+
+
+def test_bring_to_front_while_raised_moves_nothing(layered):
+    w, layer, shell, _ = layered
+    raised(layered)
+    w.bring_to_front()
+    shell.bring(int(w.winId()))
+    assert shell.calls == []
+    assert layer.state.revealed and layer.state.raised
+
+
+def test_the_watch_ticker_stops_when_the_window_switches_it_off(layered):
+    w, _, shell, ticker = layered
+    shell.bring(DESKTOP_HWND)
+    assert ticker.running
+    w.set_config_mode(True)
+    assert not ticker.running
+    shell.above = True
+    ticker.callback()  # a tick already queued when the timer stopped
+    assert shell.calls == []

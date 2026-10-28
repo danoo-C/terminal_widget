@@ -1,20 +1,22 @@
 """Keeping the desktop layer visible through "Show desktop" on Windows.
 
 The ``desktop`` layer is a single ``SetWindowPos(HWND_BOTTOM)`` that Qt makes
-when the native window is created. Show desktop (and Win+D) brings Explorer's
-desktop window to the top of the stack, and a widget at the bottom ends up
-underneath it until some other window comes forward (GitHub issue #6).
+when the native window is created. On Show desktop (and Win+D) Explorer makes
+its desktop window the foreground window and then lifts it above every normal
+window, the widget included, until an app comes forward again (GitHub issue
+#6).
 
-The fix is what Rainmeter does: watch which window is in the foreground, and
-place the widget directly above the desktop when the desktop comes forward and
-back at the bottom when anything else does. It only ever moves the widget
-within the normal window band; it never makes it topmost, so Qt's
-``windowFlags()`` stays the truth. The design is in ``docs/show-desktop.md``.
+The fix is what Rainmeter does. When the desktop comes forward, watch the
+window stack for a couple of seconds; if the desktop rises above the widget,
+that is Show desktop, and the widget is made always-on-top. When an app comes
+forward, it goes back to the bottom, which also ends always-on-top. Staying in
+the normal window band was tried first and lost to Explorer every time; the
+design and that history are in ``docs/show-desktop.md``.
 
 This module is split in two. :func:`decide` and :class:`DesktopLayer` make
-every decision, in plain Python with no Win32, so they are tested on any OS.
-The Win32 part only reports what Windows says and carries out what it is told,
-behind the :class:`Shell` protocol.
+every decision, in plain Python with no Win32 and no Qt, so they are tested on
+any OS. The Win32 part only reports what Windows says and carries out what it
+is told, behind the :class:`Shell` protocol.
 """
 
 from __future__ import annotations
@@ -40,41 +42,80 @@ class Kind(Enum):
     SELF = auto()
     #: Another window of this process, such as the tray menu.
     OWN = auto()
-    #: Anything else.
-    OTHER = auto()
+    #: A window Alt+Tab would list. One coming forward ends Show desktop.
+    APP = auto()
+    #: Anything else: the taskbar, Start, flyouts, overlays. These come
+    #: forward *during* Show desktop -- a click on the Show desktop corner
+    #: starts with the taskbar -- so they must not end it.
+    SHELL = auto()
 
 
 @dataclass(frozen=True)
 class Foreground:
+    """A foreground change."""
+
     hwnd: int
     kind: Kind
 
 
-class Action(Enum):
-    """What to do with the widget after a foreground change."""
+@dataclass(frozen=True)
+class Tick:
+    """One watch check: is the desktop window above the widget right now?"""
 
+    desktop_above: bool
+
+
+class Action(Enum):
     LEAVE = auto()
-    #: Directly above :attr:`State.desktop` in the stack.
-    ABOVE_DESKTOP = auto()
-    #: ``HWND_BOTTOM``, where Qt put it to begin with.
+    #: Always-on-top, over the shown desktop.
+    RAISE = auto()
+    #: ``HWND_BOTTOM``, where Qt put it to begin with. Also ends a raise.
     TO_BOTTOM = auto()
+
+
+#: After the desktop comes forward, check the stack this often...
+WATCH_INTERVAL_MS = 50
+#: ...this many times (2 s). Explorer lifts the desktop a moment *after* it
+#: becomes the foreground window, so one look at the event is not enough.
+WATCH_TICKS = 40
 
 
 @dataclass(frozen=True)
 class State:
     #: Set by a reveal (tray Show, second launch), so the activation that
-    #: follows is not mistaken for a click and undone. Cleared when another
-    #: window comes forward.
+    #: follows is not mistaken for a click and undone. Cleared when an app
+    #: comes forward.
     revealed: bool = False
-    #: The desktop window while it is the last thing to have come forward,
-    #: else 0. Remembered so that clicking the widget during Show desktop
-    #: keeps it above the desktop instead of sinking it back underneath.
+    #: The widget is always-on-top because the desktop is shown.
+    raised: bool = False
+    #: The desktop window being watched.
     desktop: int = 0
+    #: Checks left in the current watch; 0 when not watching.
+    ticks_left: int = 0
+
+    @property
+    def watching(self) -> bool:
+        return self.ticks_left > 0
 
 
 #: Explorer window classes that can hold the desktop's icon view. Windows 11
 #: 24H2 moved the view from a WorkerW to Progman, so both are checked.
 DESKTOP_CLASSES = frozenset({"WorkerW", "Progman"})
+
+#: Shell UI that can come forward during Show desktop without ending it,
+#: whatever its window styles say.
+SHELL_CLASSES = frozenset(
+    {
+        "Shell_TrayWnd",  # the taskbar
+        "Shell_SecondaryTrayWnd",  # the taskbar on other monitors
+        "NotifyIconOverflowWindow",  # tray overflow, Windows 10
+        "TopLevelWindowForOverflowXamlIsland",  # tray overflow, Windows 11
+        "Windows.UI.Core.CoreWindow",  # Start, search, notification flyouts
+        "XamlExplorerHostIslandWindow",  # Windows 11 shell flyouts
+        "ForegroundStaging",  # Alt+Tab and Win+Tab, in passing
+        "MultitaskingViewFrame",  # Alt+Tab
+    }
+)
 
 
 def is_desktop_class(class_name: str, has_defview: bool) -> bool:
@@ -86,29 +127,51 @@ def is_desktop_class(class_name: str, has_defview: bool) -> bool:
     return class_name in DESKTOP_CLASSES and has_defview
 
 
-def decide(fg: Foreground, state: State) -> tuple[Action, State]:
-    """Where the widget should go, given what just came to the foreground."""
-    if fg.kind in (Kind.NONE, Kind.OWN):
-        # A mid-switch NULL says nothing. Our own windows -- the tray menu --
-        # are not the user leaving the desktop, and sinking the widget while
-        # the menu is open would hide it under the desktop again.
+def classify_foreign(class_name: str, is_app_window: bool) -> Kind:
+    """APP or SHELL, for a window that is not ours and not the desktop."""
+    if class_name in SHELL_CLASSES:
+        return Kind.SHELL
+    return Kind.APP if is_app_window else Kind.SHELL
+
+
+def decide(event: Foreground | Tick, state: State) -> tuple[Action, State]:
+    """What to do with the widget, given what just happened."""
+    if isinstance(event, Tick):
+        return _decide_tick(event, state)
+    return _decide_foreground(event, state)
+
+
+def _decide_foreground(fg: Foreground, state: State) -> tuple[Action, State]:
+    if fg.kind in (Kind.NONE, Kind.OWN, Kind.SHELL):
+        # A mid-switch NULL says nothing. The tray menu, the taskbar and the
+        # Start menu are not the user leaving the desktop.
         return Action.LEAVE, state
     if fg.kind is Kind.DESKTOP:
-        return Action.ABOVE_DESKTOP, State(desktop=fg.hwnd)
-    if fg.kind is Kind.SELF:
-        if state.revealed:
-            # Activation put it in front on purpose; leave it there until
-            # another window comes forward. Not spent here: one reveal can
-            # produce more than one foreground event for the widget, and the
-            # second must not undo the first.
+        if state.raised:
             return Action.LEAVE, state
-        if state.desktop:
-            # Clicked during Show desktop. "Above the desktop" is right whether
-            # or not Explorer has left show-desktop mode by now: if it has,
-            # the desktop is back at the bottom and so is the widget.
-            return Action.ABOVE_DESKTOP, state
+        # Explorer has not lifted the desktop yet, if it is going to: a click
+        # on the wallpaper brings it forward without lifting it at all.
+        return Action.LEAVE, replace(state, desktop=fg.hwnd, ticks_left=WATCH_TICKS)
+    if fg.kind is Kind.SELF:
+        if state.revealed or state.raised:
+            # Revealed: activation put it in front on purpose, and one reveal
+            # can produce more than one foreground event. Raised: clicked
+            # during Show desktop, where it must stay visible.
+            return Action.LEAVE, state
+        # Clicked while an app covers it: it stays below the app (decision 1).
+        # A watch in progress carries on, so a click in the instant before
+        # Explorer lifts the desktop is still followed by a raise.
         return Action.TO_BOTTOM, state
+    # An app: Show desktop is over, if it was on. HWND_BOTTOM also ends a raise.
     return Action.TO_BOTTOM, State()
+
+
+def _decide_tick(tick: Tick, state: State) -> tuple[Action, State]:
+    if not state.watching:
+        return Action.LEAVE, state
+    if tick.desktop_above:
+        return Action.RAISE, replace(state, raised=True, ticks_left=0)
+    return Action.LEAVE, replace(state, ticks_left=state.ticks_left - 1)
 
 
 class Shell(Protocol):
@@ -126,9 +189,21 @@ class Shell(Protocol):
 
     def classify(self, hwnd: int, widget: int) -> Kind: ...
 
-    def place_above(self, widget: int, desktop: int) -> None: ...
+    def desktop_above(self, widget: int, desktop: int) -> bool:
+        """Whether ``desktop`` is higher in the window stack than ``widget``."""
+        ...
+
+    def raise_topmost(self, widget: int) -> None: ...
 
     def place_at_bottom(self, widget: int) -> None: ...
+
+
+class Ticker(Protocol):
+    """Calls back every :data:`WATCH_INTERVAL_MS` while started."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 class DesktopLayer:
@@ -137,14 +212,22 @@ class DesktopLayer:
     The window turns it on while the widget is visible on the desktop layer
     and off otherwise -- config mode, the other layers, mid-restack. The hook
     is installed the first time it turns on and stays installed until
-    :meth:`close`; while off, events are simply ignored.
+    :meth:`close`; while off, events are simply ignored. The ticker runs only
+    while a watch is in progress.
     """
 
-    def __init__(self, shell: Shell, widget_hwnd: Callable[[], int]) -> None:
+    def __init__(
+        self,
+        shell: Shell,
+        widget_hwnd: Callable[[], int],
+        make_ticker: Callable[[Callable[[], None]], Ticker],
+    ) -> None:
         self._shell = shell
         # A callable rather than a value: a restack destroys and recreates
         # the native window, so the handle has to be read fresh every time.
         self._widget_hwnd = widget_hwnd
+        self._ticker = make_ticker(self.on_tick)
+        self._ticking = False
         self._state = State()
         self._enabled = False
         self._installed = False
@@ -160,11 +243,24 @@ class DesktopLayer:
             # The window re-asserts this from several places. Re-running
             # resync on each would reset the state, a pending reveal included.
             return
-        if on and not self._ensure_installed():
+        if not on:
+            self._switch_off()
             return
-        self._enabled = on
-        if on:
-            self.resync()
+        if not self._ensure_installed():
+            return
+        self._enabled = True
+        self.resync()
+
+    def _switch_off(self) -> None:
+        self._enabled = False
+        self._set_ticking(False)
+        if self._state.raised:
+            # Whenever the layer stops looking -- config mode, a restack, a
+            # hide, close -- the widget goes back to where Qt believes it is.
+            # Before a restack this lands on the old native window, just
+            # before it is replaced by one that was never always-on-top.
+            self._guarded(lambda: self._shell.place_at_bottom(self._widget_hwnd()))
+        self._state = State()
 
     def _ensure_installed(self) -> bool:
         if self._installed:
@@ -192,20 +288,65 @@ class DesktopLayer:
         """React to a foreground change. Called by the shell's hook."""
         if not self._enabled:
             return
-        try:
+
+        def step() -> None:
             widget = self._widget_hwnd()
             fg = Foreground(hwnd, self._shell.classify(hwnd, widget))
-            action, self._state = decide(fg, self._state)
-            if action is Action.ABOVE_DESKTOP:
-                self._shell.place_above(widget, self._state.desktop)
-            elif action is Action.TO_BOTTOM:
-                self._shell.place_at_bottom(widget)
+            self._apply(decide(fg, self._state), widget)
+            if fg.kind is Kind.DESKTOP and self._state.watching:
+                # Look at once: a desktop that is already up should not wait
+                # a tick to be answered.
+                self.on_tick()
+
+        self._guarded(step)
+        self._set_ticking(self._state.watching)
+
+    def on_tick(self) -> None:
+        """One watch check. Called by the ticker, and once when a watch starts."""
+        if self._enabled and self._state.watching:
+
+            def step() -> None:
+                widget = self._widget_hwnd()
+                above = self._shell.desktop_above(widget, self._state.desktop)
+                self._apply(decide(Tick(above), self._state), widget)
+
+            if not self._guarded(step):
+                # A check that throws once will throw forty times; end the
+                # watch rather than print every 50 ms for two seconds.
+                self._state = replace(self._state, ticks_left=0)
+        self._set_ticking(self._enabled and self._state.watching)
+
+    def _apply(self, result: tuple[Action, State], widget: int) -> None:
+        action, self._state = result
+        if action is Action.RAISE:
+            self._shell.raise_topmost(widget)
+        elif action is Action.TO_BOTTOM:
+            self._shell.place_at_bottom(widget)
+
+    def _set_ticking(self, on: bool) -> None:
+        if on and not self._ticking:
+            self._ticker.start()
+        elif not on and self._ticking:
+            self._ticker.stop()
+        self._ticking = on
+
+    @staticmethod
+    def _guarded(step: Callable[[], None]) -> bool:
+        """Run ``step``; report an exception in one line instead of raising.
+
+        Exceptions would otherwise escape into a ctypes callback or a Qt
+        slot, which print them at length and carry on anyway.
+        """
+        try:
+            step()
         except Exception as exc:
-            # ctypes would print and drop it anyway; this makes it one line.
             print(f"terminal-widget: desktop layer: {exc!r}", file=sys.stderr)
+            return False
+        return True
 
     def resync(self) -> None:
         """Start over from whatever is in the foreground right now."""
+        self._set_ticking(False)
         self._state = State()
         self.on_foreground(self._shell.foreground())
 
@@ -214,7 +355,9 @@ class DesktopLayer:
         self._state = replace(self._state, revealed=True)
 
     def close(self) -> None:
-        self._enabled = False
+        if self._enabled:
+            self._switch_off()
+        self._set_ticking(False)
         if self._installed:
             self._installed = False
             self._shell.uninstall()
@@ -225,25 +368,30 @@ class DesktopLayer:
 EVENT_SYSTEM_FOREGROUND = 0x0003
 WINEVENT_OUTOFCONTEXT = 0x0000
 GW_HWNDPREV = 3
-HWND_TOP = 0
+GW_OWNER = 4
+GWL_EXSTYLE = -20
 HWND_BOTTOM = 1
+HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
-GWL_EXSTYLE = -20
-WS_EX_TOPMOST = 0x00000008
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+WS_EX_NOACTIVATE = 0x08000000
+DWMWA_CLOAKED = 14
 #: Every placement keeps the widget's size, position and focus: only its
 #: place in the stack changes.
 _PLACE_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
 
-# HWND_TOPMOST and HWND_NOTOPMOST are deliberately absent. Leaving the normal
-# window band would make the real window style disagree with Qt's
-# windowFlags() -- the reason a ctypes restack was turned down before
-# (issues.md, "The ctypes fast path") -- and it could put the widget over a
-# fullscreen game.
+# HWND_TOPMOST is used in one place, raise_topmost(), and only while the
+# desktop is shown: no normal-band placement survives Explorer lifting the
+# desktop (docs/show-desktop.md, decision 3). HWND_NOTOPMOST is deliberately
+# absent: HWND_BOTTOM ends always-on-top by itself, so there is one way down.
 
 #: Class names are capped at 256 characters.
 _CLASS_NAME_LEN = 256
+#: A z-order that changes during a walk cannot keep it going forever.
+_MAX_WALK = 10_000
 
 
 class Win32Shell:
@@ -259,7 +407,10 @@ class Win32Shell:
     """
 
     def __init__(self) -> None:
-        self._user32, self._proc_type = _bind_user32()
+        api = _bind()
+        self._user32 = api.user32
+        self._dwmapi = api.dwmapi
+        self._proc_type = api.proc_type
         self._hook: int | None = None
         # The ctypes wrapper around the callback. It must outlive the hook:
         # if it were collected while hooked, Windows would call freed memory
@@ -304,33 +455,57 @@ class Win32Shell:
             return Kind.SELF
         if self._process_of(hwnd) == self._pid:
             return Kind.OWN
+        name = self._class_name(hwnd)
         has_defview = bool(
             self._user32.FindWindowExW(hwnd, None, "SHELLDLL_DefView", None)
         )
-        if is_desktop_class(self._class_name(hwnd), has_defview):
+        if is_desktop_class(name, has_defview):
             return Kind.DESKTOP
-        return Kind.OTHER
+        return classify_foreign(name, self._is_app_window(hwnd))
 
-    def place_above(self, widget: int, desktop: int) -> None:
-        # Inserting after the window just above the desktop puts the widget
-        # directly on top of it. After a click on the wallpaper the desktop
-        # is still at the bottom, so the widget stays behind every app.
-        prev = int(self._user32.GetWindow(desktop, GW_HWNDPREV) or 0)
-        if prev == widget:
-            return
-        if prev and self._is_topmost(prev):
-            # Topmost windows always sit above every normal one, so a topmost
-            # window directly above the desktop means no normal window is:
-            # Show desktop, where the taskbar is what sits above it. Going in
-            # after a topmost window would make the widget topmost too, so
-            # take the top of the normal band instead.
-            prev = 0
-        self._set_pos(widget, prev or HWND_TOP)
+    def _is_app_window(self, hwnd: int) -> bool:
+        """The usual "would Alt+Tab list it?" test."""
+        u = self._user32
+        if not u.IsWindowVisible(hwnd) or self._cloaked(hwnd):
+            return False
+        ex = u.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        if ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE):
+            return False
+        return not u.GetWindow(hwnd, GW_OWNER) or bool(ex & WS_EX_APPWINDOW)
 
-    def _is_topmost(self, hwnd: int) -> bool:
-        return bool(self._user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+    def _cloaked(self, hwnd: int) -> bool:
+        """Hidden by DWM: another virtual desktop, a suspended UWP app."""
+        if self._dwmapi is None:
+            return False
+        import ctypes
+
+        value = ctypes.c_uint32()
+        hr = self._dwmapi.DwmGetWindowAttribute(
+            hwnd, DWMWA_CLOAKED, ctypes.byref(value), ctypes.sizeof(value)
+        )
+        return hr == 0 and value.value != 0
+
+    def desktop_above(self, widget: int, desktop: int) -> bool:
+        # Walk up from the widget. Visibility does not matter: the question is
+        # only which of the two is higher.
+        if not widget or not desktop:
+            return False
+        h = widget
+        for _ in range(_MAX_WALK):
+            h = int(self._user32.GetWindow(h, GW_HWNDPREV) or 0)
+            if not h:
+                return False
+            if h == desktop:
+                return True
+        return False
+
+    def raise_topmost(self, widget: int) -> None:
+        self._set_pos(widget, HWND_TOPMOST)
 
     def place_at_bottom(self, widget: int) -> None:
+        # Also the way down from raise_topmost(). SetWindowPos documents that
+        # a topmost window sent to HWND_BOTTOM "loses its topmost status and
+        # is placed at the bottom of all other windows".
         self._set_pos(widget, HWND_BOTTOM)
 
     def _set_pos(self, widget: int, insert_after: int) -> None:
@@ -354,8 +529,16 @@ class Win32Shell:
         return buf.value
 
 
-def _bind_user32() -> tuple[Any, Any]:
-    """``user32`` with every function this module uses declared.
+@dataclass(frozen=True)
+class _Api:
+    user32: Any
+    #: None if dwmapi would not load; windows then count as not cloaked.
+    dwmapi: Any
+    proc_type: Any
+
+
+def _bind() -> _Api:
+    """``user32`` and ``dwmapi`` with every function this module uses declared.
 
     Declared in full rather than called bare: ctypes' default return type is
     a C ``int``, which silently truncates a 64-bit window handle.
@@ -367,39 +550,61 @@ def _bind_user32() -> tuple[Any, Any]:
     from ctypes import wintypes
 
     user32 = ctypes.WinDLL("user32")
-    hwnd, dword, uint = wintypes.HWND, wintypes.DWORD, wintypes.UINT
+    hwnd, dword, uint, boolean = (
+        wintypes.HWND,
+        wintypes.DWORD,
+        wintypes.UINT,
+        wintypes.BOOL,
+    )
     hook_handle = wintypes.HANDLE
 
     proc_type = ctypes.WINFUNCTYPE(
         None, hook_handle, dword, hwnd, wintypes.LONG, wintypes.LONG, dword, dword
     )
 
-    def declare(name: str, restype: Any, *argtypes: Any) -> None:
-        fn = getattr(user32, name)
+    def declare(dll: Any, name: str, restype: Any, *argtypes: Any) -> None:
+        fn = getattr(dll, name)
         fn.restype = restype
         fn.argtypes = list(argtypes)
 
     declare(
+        user32,
         "SetWinEventHook",
         hook_handle,
         uint, uint, wintypes.HMODULE, proc_type, dword, dword, uint,
     )
-    declare("UnhookWinEvent", wintypes.BOOL, hook_handle)
-    declare("GetForegroundWindow", hwnd)
-    declare("GetClassNameW", ctypes.c_int, hwnd, wintypes.LPWSTR, ctypes.c_int)
-    declare("FindWindowExW", hwnd, hwnd, hwnd, wintypes.LPCWSTR, wintypes.LPCWSTR)
-    declare("GetWindowThreadProcessId", dword, hwnd, ctypes.POINTER(dword))
-    declare("GetWindow", hwnd, hwnd, uint)
+    declare(user32, "UnhookWinEvent", boolean, hook_handle)
+    declare(user32, "GetForegroundWindow", hwnd)
+    declare(user32, "GetClassNameW", ctypes.c_int, hwnd, wintypes.LPWSTR, ctypes.c_int)
+    declare(
+        user32, "FindWindowExW", hwnd, hwnd, hwnd, wintypes.LPCWSTR, wintypes.LPCWSTR
+    )
+    declare(user32, "GetWindowThreadProcessId", dword, hwnd, ctypes.POINTER(dword))
+    declare(user32, "GetWindow", hwnd, hwnd, uint)
+    declare(user32, "IsWindowVisible", boolean, hwnd)
     if not hasattr(user32, "GetWindowLongPtrW"):
         # 32-bit user32 has no Ptr variant; there it is a macro for this.
         setattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
-    declare("GetWindowLongPtrW", ctypes.c_ssize_t, hwnd, ctypes.c_int)
+    declare(user32, "GetWindowLongPtrW", ctypes.c_ssize_t, hwnd, ctypes.c_int)
     declare(
+        user32,
         "SetWindowPos",
-        wintypes.BOOL,
+        boolean,
         hwnd, hwnd, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, uint,
     )
-    return user32, proc_type
+
+    try:
+        dwmapi: Any = ctypes.WinDLL("dwmapi")
+        declare(
+            dwmapi,
+            "DwmGetWindowAttribute",
+            ctypes.c_long,
+            hwnd, dword, ctypes.c_void_p, dword,
+        )
+    except OSError:
+        dwmapi = None
+
+    return _Api(user32=user32, dwmapi=dwmapi, proc_type=proc_type)
 
 
 def create(widget_hwnd: Callable[[], int]) -> DesktopLayer | None:
@@ -418,4 +623,14 @@ def create(widget_hwnd: Callable[[], int]) -> DesktopLayer | None:
     except OSError as exc:
         print(f"terminal-widget: desktop layer unavailable: {exc}", file=sys.stderr)
         return None
-    return DesktopLayer(shell, widget_hwnd)
+
+    # Imported here so the platform-free half of this module stays Qt-free.
+    from PySide6.QtCore import QTimer
+
+    def make_ticker(callback: Callable[[], None]) -> Ticker:
+        timer = QTimer()
+        timer.setInterval(WATCH_INTERVAL_MS)
+        timer.timeout.connect(callback)
+        return timer
+
+    return DesktopLayer(shell, widget_hwnd, make_ticker)
