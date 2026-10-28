@@ -1,9 +1,9 @@
 # Surviving "Show desktop" on Windows
 
-**Status:** second design, confirmed working on the target machine on
-2026-10-28 by an experiment (the debug launcher with Qt's bottom hint
-removed). Not yet built as product code: plans 04–06 in
-[`plans/show-desktop-always-on-top/`](plans/show-desktop-always-on-top/README.md).
+**Status:** landed, 2026-10-28. Built as plans 01–05 in
+[`plans/show-desktop-always-on-top/`](plans/show-desktop-always-on-top/README.md),
+and confirmed working on the target machine (Windows 11). The hand checklist
+under *Testing* is partly done. `issues.md` section 4 has the summary.
 Fixes GitHub issue #6. Branch `issue-6-show-desktop`. The two earlier attempts
 and what actually defeated them are under *History* at the end.
 
@@ -287,10 +287,10 @@ round trip and settings-app control.
 
 **By hand on Windows**, with the debug launcher:
 
-- [x] Show desktop corner and Win+D: widget stays visible *(experiment,
-      2026-10-28)*
-- [ ] With the delay tuned, the widget appears as the minimise animation ends,
-      not during it
+- [x] Show desktop corner and Win+D: widget stays visible *(2026-10-28, first
+      in the experiment, then in the built code)*
+- [x] With the delay set, the widget appears as the minimise animation ends,
+      not during it *(2026-10-28)*
 - [ ] Win+D, then Win+D again quickly (within the delay): widget never jumps
       on top
 - [ ] Win+D, then Win+D again: apps come back *above* it

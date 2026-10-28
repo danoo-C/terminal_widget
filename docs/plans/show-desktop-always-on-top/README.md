@@ -37,7 +37,7 @@ step 2.
 | 3 | [Window integration check](03-window-integration.md) | `tests/test_window.py` | fully, with fakes | built, `a618134` |
 | 4 | [No Qt bottom hint on Windows](04-no-qt-bottom-hint.md) | `desktop_layer.py`, `window.py`, tests | fully, with fakes | built |
 | 5 | [Show desktop delay setting](05-show-desktop-delay.md) | `desktop_layer.py`, `config.py`, `window.py`, settings app, tests | fully | built |
-| 6 | [Verify on Windows and close out](06-verify-on-windows.md) | the debug launcher, `issues.md`, `README.md`, the PR | no, needs the real desktop | to do |
+| 6 | [Verify on Windows and close out](06-verify-on-windows.md) | the debug launcher, `issues.md`, `README.md`, the PR | no, needs the real desktop | write-up done; PR to do |
 
 Commit after each step, with the full suite and `pyright` passing.
 

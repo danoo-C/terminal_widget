@@ -45,7 +45,9 @@ leaves the text crisp on your wallpaper.
 
 **Position and layering.** Exact pixel geometry, remembered between sessions.
 Sits behind your other windows by default, or in the normal window order, or
-always on top.
+always on top. On Windows the default layer stays visible through Show desktop
+and Win+D, the way Rainmeter skins do. It comes up over the uncovered desktop
+after a delay you can match to your minimise animation.
 
 **Scrollback.** Up to 50,000 lines, scrolled with the wheel or
 Shift+PageUp/PageDown/Home/End. Full-screen programs like `vim` and `htop` do not
