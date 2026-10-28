@@ -11,7 +11,8 @@ shutdown. About 20 lines in `window.py`.
 
 ## 3.1 Construction
 
-In `WidgetWindow.__init__`, after the flags are set:
+In `WidgetWindow.__init__`, next to the other plain fields and **before** the
+flags are set, so no show or hide event can arrive before the field exists:
 
 ```python
 self._desktop_layer = create_desktop_layer(lambda: int(self.winId()))

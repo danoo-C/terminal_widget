@@ -26,6 +26,7 @@ from .config import (
     resolve_shell,
     working_dir_for,
 )
+from .desktop_layer import create as create_desktop_layer
 from .platform_info import DISPLAY_NAME, icon_path
 from .renderer import TerminalView
 from .session import TerminalSession
@@ -122,6 +123,11 @@ class WidgetWindow(QWidget):
         self._drag_origin = None
         self._translucent = False
         self._restacking = False
+        # Keeps the desktop layer visible through Show desktop; None except on
+        # Windows. Created before anything can send a show or hide event, and
+        # handed the handle as a callable because a restack replaces the
+        # native window.
+        self._desktop_layer = create_desktop_layer(lambda: int(self.winId()))
 
         self.setWindowTitle(DISPLAY_NAME)
         icon = icon_path()
@@ -328,6 +334,9 @@ class WidgetWindow(QWidget):
         else:
             self.unsetCursor()
             self._drag_origin = None
+        # Again because the restack may have been a no-op, and config mode
+        # changed either way.
+        self._sync_desktop_layer()
         self.update()
 
     # -- Stacking ----------------------------------------------------
@@ -370,6 +379,9 @@ class WidgetWindow(QWidget):
         # length: pos() would be the frame position and would drift.
         geom = self.geometry()
         self._restacking = True
+        # Off for the duration: the native window is about to be destroyed,
+        # and a foreground event in between would move a handle that is gone.
+        self._sync_desktop_layer()
         try:
             self.setWindowFlags(wanted)
             if was_visible:
@@ -387,6 +399,31 @@ class WidgetWindow(QWidget):
                 self.view.setFocus()
         finally:
             self._restacking = False
+        # And back on, with the new handle, if the new layer wants it.
+        self._sync_desktop_layer()
+
+    def _sync_desktop_layer(self) -> None:
+        """Turn the Show-desktop watcher on exactly when it has work to do.
+
+        That is: visible, not mid-restack, and on the desktop layer.
+        ``_stacking_hint()`` already folds config mode in, so config mode and
+        the ``normal`` and ``top`` layers all come out as off here.
+        """
+        if self._desktop_layer is None:
+            return
+        self._desktop_layer.enabled = (
+            self.isVisible()
+            and not self._restacking
+            and self._stacking_hint() == Qt.WindowType.WindowStaysOnBottomHint
+        )
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_desktop_layer()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._sync_desktop_layer()
 
     def bring_to_front(self) -> None:
         """Make the widget visible and focused, whatever layer it lives in.
@@ -400,6 +437,11 @@ class WidgetWindow(QWidget):
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
         self.show()
         self.raise_()
+        if self._desktop_layer is not None:
+            # After show(), whose resync would wipe it; before the activation
+            # it is there to protect, which would otherwise read as a click
+            # and be sent straight back to the bottom.
+            self._desktop_layer.reveal()
         self.activateWindow()
         self.view.setFocus()
 
@@ -573,6 +615,9 @@ class WidgetWindow(QWidget):
         if self.session is not None:
             self.session.stop()
             self.session = None
+        if self._desktop_layer is not None:
+            # Unhooked before anyone hears `closed` and quits the app.
+            self._desktop_layer.close()
         super().closeEvent(event)
         # Only after the session is down: whoever is listening quits the
         # application, and the shell must already be gone by then.

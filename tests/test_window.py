@@ -1,7 +1,9 @@
 """Tests for the two modes -- the core of the widget's design."""
 
+import sys
 import time
 
+import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
@@ -617,3 +619,148 @@ def test_esc_still_reaches_a_shell_that_is_running(live):
 
     assert sent == ["\x1b"]
     assert not closed
+
+
+# -- Show desktop (the desktop layer watcher) ---------------------------
+#
+# The watcher only exists on Windows, so these build one by hand over the
+# FakeShell from conftest. What Windows does with the placements is checked
+# on Windows; what is checked here is that the window turns the watcher on
+# and off at the right moments and hands it the right handle.
+
+APP_HWND = 0x300
+DESKTOP_HWND = 0x200
+
+
+@pytest.fixture
+def layered(qapp, monkeypatch, fake_shell):
+    """A shown widget on the desktop layer, with a watcher over a fake shell."""
+    from terminal_widget import window as window_module
+    from terminal_widget.desktop_layer import DesktopLayer, Kind
+    from terminal_widget.window import WidgetWindow
+
+    fake_shell.kinds[DESKTOP_HWND] = Kind.DESKTOP
+    monkeypatch.setattr(
+        window_module,
+        "create_desktop_layer",
+        lambda hwnd: DesktopLayer(fake_shell, hwnd),
+    )
+    w = WidgetWindow(Config(x=100, y=100, width=640, height=320))
+    w.show()
+    yield w, w._desktop_layer, fake_shell
+    w.close()
+
+
+def test_off_windows_there_is_no_watcher(window):
+    """The real factory; the suite runs off Windows."""
+    if sys.platform == "win32":
+        pytest.skip("Windows builds a real watcher")
+    assert window._desktop_layer is None
+
+
+def test_shown_on_the_desktop_layer_the_watcher_is_on(layered):
+    _, layer, shell = layered
+    assert layer.enabled
+    assert shell.installs == 1
+
+
+def test_switching_on_places_the_widget_at_once(layered):
+    """It acts on what is in front now, without waiting for the next event."""
+    w, _, shell = layered
+    assert shell.calls == []  # nothing in front yet, so nothing to do
+    shell.fg = DESKTOP_HWND
+    w.hide()
+    w.show()
+    assert shell.calls == [("above", int(w.winId()), DESKTOP_HWND)]
+
+
+def test_config_mode_switches_it_off_and_back_on(layered):
+    w, layer, _ = layered
+    w.set_config_mode(True)
+    assert not layer.enabled
+    w.set_config_mode(False)
+    assert layer.enabled
+
+
+@pytest.mark.parametrize("stacking", [STACKING_NORMAL, STACKING_TOP])
+def test_the_other_layers_switch_it_off(layered, stacking):
+    w, layer, _ = layered
+    w.apply_config(replace_stacking(w, stacking))
+    assert not layer.enabled
+    w.apply_config(replace_stacking(w, STACKING_DESKTOP))
+    assert layer.enabled
+
+
+def test_a_layer_change_in_config_mode_leaves_it_off_until_the_end(layered):
+    w, layer, _ = layered
+    w.set_config_mode(True)
+    w.apply_config(replace_stacking(w, STACKING_NORMAL))
+    w.apply_config(replace_stacking(w, STACKING_DESKTOP))
+    assert not layer.enabled
+    w.set_config_mode(False)
+    assert layer.enabled
+
+
+def test_it_is_off_while_the_native_window_is_replaced(layered, monkeypatch):
+    w, layer, _ = layered
+    seen = []
+    original = w.setWindowFlags
+
+    def spy(flags):
+        seen.append(layer.enabled)
+        original(flags)
+
+    monkeypatch.setattr(w, "setWindowFlags", spy)
+    w.apply_config(replace_stacking(w, STACKING_TOP))
+    assert seen == [False]
+
+
+def test_hidden_it_is_off(layered):
+    w, layer, _ = layered
+    w.hide()
+    assert not layer.enabled
+
+
+def test_bring_to_front_marks_a_reveal(layered):
+    w, layer, shell = layered
+    w.bring_to_front()
+    assert layer.state.revealed
+    shell.calls.clear()
+    shell.bring(int(w.winId()))
+    assert shell.calls == []
+
+
+def test_a_reveal_from_hidden_survives_the_show(layered):
+    """show() switches the watcher on, which starts from a clean state; the
+    reveal has to land after that or it is wiped."""
+    w, layer, _ = layered
+    w.hide()
+    w.bring_to_front()
+    assert layer.enabled and layer.state.revealed
+
+
+def test_foreground_events_move_the_current_native_window(layered):
+    w, _, shell = layered
+    shell.calls.clear()
+    shell.bring(DESKTOP_HWND)
+    shell.bring(APP_HWND)
+    hwnd = int(w.winId())
+    assert shell.calls == [("above", hwnd, DESKTOP_HWND), ("bottom", hwnd)]
+
+
+def test_events_after_a_restack_use_the_new_handle(layered):
+    w, _, shell = layered
+    w.set_config_mode(True)
+    w.set_config_mode(False)
+    shell.calls.clear()
+    shell.bring(APP_HWND)
+    assert shell.calls == [("bottom", int(w.winId()))]
+
+
+def test_closing_unhooks_before_announcing_it(layered):
+    w, _, shell = layered
+    installed_when_closed = []
+    w.closed.connect(lambda: installed_when_closed.append(shell.installed))
+    w.close()
+    assert installed_when_closed == [False]
+    assert shell.uninstalls == 1
