@@ -13,9 +13,9 @@ the desktop rather than being an application you switch to.
 
 Runs on **Linux** and **Windows**. Python 3.11+.
 
-> **Status:** working and installable on Linux, with 279 tests covering it. The
-> Windows code paths are written but have never been run — see `issues.md` for
-> what still needs checking there.
+> **Status:** working and installable on Linux and Windows, with over 400 tests
+> covering it. It's in daily use on Windows 11. `issues.md` lists what still
+> needs checking by hand there.
 
 ---
 
@@ -51,9 +51,16 @@ leaves the text crisp on your wallpaper.
 
 **Position and layering.** Exact pixel geometry, remembered between sessions.
 Sits behind your other windows by default, or in the normal window order, or
-always on top. On Windows the default layer stays visible through Show desktop
-and Win+D, the way Rainmeter skins do. It comes up over the uncovered desktop
-after a delay you can match to your minimise animation.
+always on top.
+
+**Show desktop (Windows).** Show desktop and Win+D don't make the widget
+disappear. Like a Rainmeter skin, it stays on the uncovered desktop, then drops
+back behind your windows as soon as you open one. It waits for your windows to
+finish minimising before it appears, so it doesn't pop up over them while
+they're still shrinking. That wait is the **Show desktop delay** in the settings
+app, under *Window layer*: 250 ms by default, adjustable from 0 to 2000 ms. A
+new value takes effect on the next Show desktop, with no restart. It applies to
+the default "Behind other windows" layer only.
 
 **Scrollback.** Up to 50,000 lines, scrolled with the wheel or
 Shift+PageUp/PageDown/Home/End. Full-screen programs like `vim` and `htop` do not
