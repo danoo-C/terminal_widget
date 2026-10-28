@@ -128,6 +128,8 @@ class WidgetWindow(QWidget):
         # handed the handle as a callable because a restack replaces the
         # native window.
         self._desktop_layer = create_desktop_layer(lambda: int(self.winId()))
+        if self._desktop_layer is not None:
+            self._desktop_layer.raise_delay_ms = config.show_desktop_delay_ms
 
         self.setWindowTitle(DISPLAY_NAME)
         icon = icon_path()
@@ -350,9 +352,19 @@ class WidgetWindow(QWidget):
         """
         if self._config_mode:
             return _NO_HINT
-        return _STACKING_HINTS.get(
+        hint = _STACKING_HINTS.get(
             self._config.stacking, Qt.WindowType.WindowStaysOnBottomHint
         )
+        if (
+            hint == Qt.WindowType.WindowStaysOnBottomHint
+            and self._desktop_layer is not None
+        ):
+            # Qt's Windows plugin rewrites every stacking change of a
+            # bottom-hint window to HWND_BOTTOM, which would undo the
+            # Show-desktop watcher's raise (docs/show-desktop.md). The watcher
+            # keeps the widget at the bottom instead.
+            return _NO_HINT
+        return hint
 
     def _window_flags(self) -> Qt.WindowType:
         return BASE_FLAGS | self._stacking_hint()
@@ -405,16 +417,17 @@ class WidgetWindow(QWidget):
     def _sync_desktop_layer(self) -> None:
         """Turn the Show-desktop watcher on exactly when it has work to do.
 
-        That is: visible, not mid-restack, and on the desktop layer.
-        ``_stacking_hint()`` already folds config mode in, so config mode and
-        the ``normal`` and ``top`` layers all come out as off here.
+        That is: visible, not mid-restack, not in config mode, and on the
+        desktop layer. Read from the setting rather than the window flags:
+        with a watcher, the desktop layer has no flag of its own.
         """
         if self._desktop_layer is None:
             return
         self._desktop_layer.enabled = (
             self.isVisible()
             and not self._restacking
-            and self._stacking_hint() == Qt.WindowType.WindowStaysOnBottomHint
+            and not self._config_mode
+            and self._config.stacking == STACKING_DESKTOP
         )
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -430,9 +443,9 @@ class WidgetWindow(QWidget):
 
         The only way back to a window with no taskbar button and no Alt+Tab
         slot, so it has to work from the desktop layer and from minimised.
-        ``raise_()`` is a deliberate no-op on Windows while the bottom hint is
-        set -- Qt's platform plugin refuses it -- so ``activateWindow()`` is
-        the half that does the work there.
+        Where the desktop layer still uses Qt's bottom hint -- off Windows, or
+        on Windows without a watcher -- ``raise_()`` is a deliberate no-op in
+        Qt's Windows plugin, and ``activateWindow()`` is the half that works.
         """
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
         self.show()
@@ -482,6 +495,10 @@ class WidgetWindow(QWidget):
             self._apply_window_opacity()
         if config.scrollback != previous.scrollback and self.session is not None:
             self.session.set_scrollback(config.scrollback)
+        if self._desktop_layer is not None:
+            # Picked up by the next Show desktop; a watch already running
+            # keeps the delay it started with.
+            self._desktop_layer.raise_delay_ms = config.show_desktop_delay_ms
         if config.stacking != previous.stacking:
             # Before the geometry block, so the restack's own geometry restore
             # cannot land on top of the size we were actually asked for.
@@ -492,6 +509,9 @@ class WidgetWindow(QWidget):
             # mode lasts, so this is a no-op until settings goes away. Same
             # bargain the shell and working-directory fields already make.
             self._restack()
+            # Separately, because with a watcher the desktop and normal layers
+            # share their flags on Windows, and then the restack is a no-op.
+            self._sync_desktop_layer()
 
         geom = self.geometry()
         if target != (geom.x(), geom.y(), geom.width(), geom.height()):

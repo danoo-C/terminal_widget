@@ -9,9 +9,12 @@ window, the widget included, until an app comes forward again (GitHub issue
 The fix is what Rainmeter does. When the desktop comes forward, watch the
 window stack for a couple of seconds; if the desktop rises above the widget,
 that is Show desktop, and the widget is made always-on-top. When an app comes
-forward, it goes back to the bottom, which also ends always-on-top. Staying in
-the normal window band was tried first and lost to Explorer every time; the
-design and that history are in ``docs/show-desktop.md``.
+forward, it goes back to the bottom, which also ends always-on-top.
+
+On Windows this replaces Qt's ``WindowStaysOnBottomHint``, which can't stay:
+Qt rewrites every stacking change of such a window to ``HWND_BOTTOM``, and so
+silently undid every raise until it was dropped. The design and that history
+are in ``docs/show-desktop.md``.
 
 This module is split in two. :func:`decide` and :class:`DesktopLayer` make
 every decision, in plain Python with no Win32 and no Qt, so they are tested on
@@ -75,8 +78,9 @@ class Action(Enum):
 
 #: After the desktop comes forward, check the stack this often...
 WATCH_INTERVAL_MS = 50
-#: ...this many times (2 s). Explorer lifts the desktop a moment *after* it
-#: becomes the foreground window, so one look at the event is not enough.
+#: ...for this many checks (2 s) after the Show desktop delay. Explorer lifts
+#: the desktop a moment *after* it becomes the foreground window, so one look
+#: at the event is not enough.
 WATCH_TICKS = 40
 
 
@@ -88,14 +92,21 @@ class State:
     revealed: bool = False
     #: The widget is always-on-top because the desktop is shown.
     raised: bool = False
-    #: The desktop window being watched.
+    #: The desktop window being watched; 0 when not watching.
     desktop: int = 0
-    #: Checks left in the current watch; 0 when not watching.
-    ticks_left: int = 0
+    #: Checks made in this watch so far. The one made at once is check 0, and
+    #: each timer tick after it is one more, WATCH_INTERVAL_MS apart.
+    elapsed: int = 0
+    #: The Show desktop delay for this watch, in checks. Fixed when the watch
+    #: starts, so changing the setting mid-watch does not move the goalposts.
+    raise_after: int = 0
 
     @property
     def watching(self) -> bool:
-        return self.ticks_left > 0
+        return self.desktop != 0
+
+    def watch_over(self) -> State:
+        return replace(self, desktop=0, elapsed=0, raise_after=0)
 
 
 #: Explorer window classes that can hold the desktop's icon view. Windows 11
@@ -134,14 +145,22 @@ def classify_foreign(class_name: str, is_app_window: bool) -> Kind:
     return Kind.APP if is_app_window else Kind.SHELL
 
 
-def decide(event: Foreground | Tick, state: State) -> tuple[Action, State]:
-    """What to do with the widget, given what just happened."""
+def decide(
+    event: Foreground | Tick, state: State, raise_after: int = 0
+) -> tuple[Action, State]:
+    """What to do with the widget, given what just happened.
+
+    ``raise_after`` is the Show desktop delay in watch checks. Only a desktop
+    coming forward reads it, to start a watch with it.
+    """
     if isinstance(event, Tick):
         return _decide_tick(event, state)
-    return _decide_foreground(event, state)
+    return _decide_foreground(event, state, raise_after)
 
 
-def _decide_foreground(fg: Foreground, state: State) -> tuple[Action, State]:
+def _decide_foreground(
+    fg: Foreground, state: State, raise_after: int
+) -> tuple[Action, State]:
     if fg.kind in (Kind.NONE, Kind.OWN, Kind.SHELL):
         # A mid-switch NULL says nothing. The tray menu, the taskbar and the
         # Start menu are not the user leaving the desktop.
@@ -150,8 +169,11 @@ def _decide_foreground(fg: Foreground, state: State) -> tuple[Action, State]:
         if state.raised:
             return Action.LEAVE, state
         # Explorer has not lifted the desktop yet, if it is going to: a click
-        # on the wallpaper brings it forward without lifting it at all.
-        return Action.LEAVE, replace(state, desktop=fg.hwnd, ticks_left=WATCH_TICKS)
+        # on the wallpaper brings it forward without lifting it at all. A
+        # second desktop event mid-watch starts the count again.
+        return Action.LEAVE, replace(
+            state.watch_over(), desktop=fg.hwnd, raise_after=max(0, raise_after)
+        )
     if fg.kind is Kind.SELF:
         if state.revealed or state.raised:
             # Revealed: activation put it in front on purpose, and one reveal
@@ -169,9 +191,13 @@ def _decide_foreground(fg: Foreground, state: State) -> tuple[Action, State]:
 def _decide_tick(tick: Tick, state: State) -> tuple[Action, State]:
     if not state.watching:
         return Action.LEAVE, state
-    if tick.desktop_above:
-        return Action.RAISE, replace(state, raised=True, ticks_left=0)
-    return Action.LEAVE, replace(state, ticks_left=state.ticks_left - 1)
+    if tick.desktop_above and state.elapsed >= state.raise_after:
+        # Show desktop, and the minimise animation has had its time.
+        return Action.RAISE, replace(state.watch_over(), raised=True)
+    if state.elapsed + 1 >= state.raise_after + WATCH_TICKS:
+        # The desktop never rose: a click on the wallpaper, most likely.
+        return Action.LEAVE, state.watch_over()
+    return Action.LEAVE, replace(state, elapsed=state.elapsed + 1)
 
 
 class Shell(Protocol):
@@ -232,6 +258,21 @@ class DesktopLayer:
         self._enabled = False
         self._installed = False
         self._failed = False
+        self._raise_delay_ms = 0
+
+    @property
+    def raise_delay_ms(self) -> int:
+        """The Show desktop delay: how long after the desktop comes forward
+        the widget waits before coming up on top. Applies from the next watch."""
+        return self._raise_delay_ms
+
+    @raise_delay_ms.setter
+    def raise_delay_ms(self, ms: int) -> None:
+        self._raise_delay_ms = max(0, int(ms))
+
+    def _raise_after_ticks(self) -> int:
+        # Rounded up: the setting promises *at least* this long.
+        return -(-self._raise_delay_ms // WATCH_INTERVAL_MS)
 
     @property
     def enabled(self) -> bool:
@@ -246,9 +287,13 @@ class DesktopLayer:
         if not on:
             self._switch_off()
             return
-        if not self._ensure_installed():
+        if not self.install():
             return
         self._enabled = True
+        # Without Qt's bottom hint (docs/show-desktop.md, decision 4) nothing
+        # else puts the widget at the bottom: not startup, not the end of
+        # config mode, not a fresh native window after a restack.
+        self._guarded(lambda: self._shell.place_at_bottom(self._widget_hwnd()))
         self.resync()
 
     def _switch_off(self) -> None:
@@ -262,7 +307,12 @@ class DesktopLayer:
             self._guarded(lambda: self._shell.place_at_bottom(self._widget_hwnd()))
         self._state = State()
 
-    def _ensure_installed(self) -> bool:
+    def install(self) -> bool:
+        """Install the foreground hook, once. False if Windows refused it.
+
+        ``create()`` calls this up front, so that a watcher that exists is one
+        that works: the window drops Qt's bottom hint only when it has one.
+        """
         if self._installed:
             return True
         if self._failed:
@@ -292,7 +342,7 @@ class DesktopLayer:
         def step() -> None:
             widget = self._widget_hwnd()
             fg = Foreground(hwnd, self._shell.classify(hwnd, widget))
-            self._apply(decide(fg, self._state), widget)
+            self._apply(decide(fg, self._state, self._raise_after_ticks()), widget)
             if fg.kind is Kind.DESKTOP and self._state.watching:
                 # Look at once: a desktop that is already up should not wait
                 # a tick to be answered.
@@ -313,7 +363,7 @@ class DesktopLayer:
             if not self._guarded(step):
                 # A check that throws once will throw forty times; end the
                 # watch rather than print every 50 ms for two seconds.
-                self._state = replace(self._state, ticks_left=0)
+                self._state = self._state.watch_over()
         self._set_ticking(self._enabled and self._state.watching)
 
     def _apply(self, result: tuple[Action, State], widget: int) -> None:
@@ -610,11 +660,10 @@ def _bind() -> _Api:
 def create(widget_hwnd: Callable[[], int]) -> DesktopLayer | None:
     """The desktop layer for this platform, or None where none is needed.
 
-    Only Windows gets one: there the bottom hint is a single ``SetWindowPos``
-    that nothing maintains. X11 has ``_NET_WM_STATE_BELOW``, which the window
-    manager holds, and Show desktop on Linux is out of scope for issue #6.
-    A binding failure also means None, so the widget behaves as it did
-    before this existed rather than not starting.
+    Only Windows gets one. Elsewhere, and on Windows when the binding or the
+    hook fails, the result is None, and the window keeps Qt's bottom hint:
+    the widget behaves as it did before this existed rather than not
+    starting. Show desktop on Linux is out of scope for issue #6.
     """
     if not is_windows():
         return None
@@ -633,4 +682,9 @@ def create(widget_hwnd: Callable[[], int]) -> DesktopLayer | None:
         timer.timeout.connect(callback)
         return timer
 
-    return DesktopLayer(shell, widget_hwnd, make_ticker)
+    layer = DesktopLayer(shell, widget_hwnd, make_ticker)
+    # Up front: the window decides from this whether to keep Qt's bottom
+    # hint, and it cannot take that back later without a restack.
+    if not layer.install():
+        return None
+    return layer

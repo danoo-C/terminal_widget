@@ -2,6 +2,7 @@
 
 import sys
 import time
+from dataclasses import replace
 
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
@@ -648,7 +649,11 @@ def layered(qapp, monkeypatch, fake_shell, ticker_factory):
         "create_desktop_layer",
         lambda hwnd: DesktopLayer(fake_shell, hwnd, ticker_factory),
     )
-    w = WidgetWindow(Config(x=100, y=100, width=640, height=320))
+    # No Show desktop delay, so a raise happens on the check that sees the
+    # desktop up; the delay has tests of its own.
+    w = WidgetWindow(
+        Config(x=100, y=100, width=640, height=320, show_desktop_delay_ms=0)
+    )
     w.show()
     yield w, w._desktop_layer, fake_shell, ticker_factory.ticker
     w.close()
@@ -677,10 +682,15 @@ def test_shown_on_the_desktop_layer_the_watcher_is_on(layered):
     assert shell.installs == 1
 
 
+def test_showing_sends_the_widget_to_the_bottom(layered):
+    """What Qt's bottom hint did, now that the desktop layer has none."""
+    w, _, shell, _ = layered
+    assert shell.calls == [("bottom", int(w.winId()))]
+
+
 def test_switching_on_looks_at_once(layered):
     """It acts on what is in front now, without waiting for the next event."""
     w, _, shell, ticker = layered
-    assert shell.calls == []  # nothing in front yet, so nothing to do
     shell.fg = DESKTOP_HWND
     w.hide()
     w.show()
@@ -755,6 +765,7 @@ def test_a_reveal_from_hidden_survives_the_show(layered):
 
 def test_foreground_events_move_the_current_native_window(layered):
     w, _, shell, _ = layered
+    shell.calls.clear()
     shell.above = True
     shell.bring(DESKTOP_HWND)
     shell.bring(APP_HWND)
@@ -786,19 +797,11 @@ def test_closing_unhooks_before_announcing_it(layered):
 # Windows and Qt's flags agree again (plan 03, section 3.1).
 
 
-def test_config_mode_while_raised_lowers_before_the_restack(layered, monkeypatch):
+def test_config_mode_while_raised_lowers_it(layered):
     w, layer, shell, _ = layered
     hwnd = raised(layered)
-    calls_at_restack = []
-    original = w.setWindowFlags
-
-    def spy(flags):
-        calls_at_restack.append(list(shell.calls))
-        original(flags)
-
-    monkeypatch.setattr(w, "setWindowFlags", spy)
     w.set_config_mode(True)
-    assert calls_at_restack == [[("bottom", hwnd)]]
+    assert shell.calls == [("bottom", hwnd)]
     assert not layer.enabled and not layer.state.raised
 
 
@@ -855,6 +858,87 @@ def test_the_watch_ticker_stops_when_the_window_switches_it_off(layered):
     assert ticker.running
     w.set_config_mode(True)
     assert not ticker.running
+    shell.calls.clear()
     shell.above = True
     ticker.callback()  # a tick already queued when the timer stopped
     assert shell.calls == []
+
+
+# -- No Qt bottom hint while a watcher exists ------------------------------
+#
+# Qt rewrites every stacking change of a bottom-hint window to HWND_BOTTOM,
+# which undid every raise until the hint was dropped (docs/show-desktop.md,
+# decision 4). Without a watcher -- off Windows, as in the rest of this file
+# -- the hint stays: test_the_default_layer_is_behind_other_windows.
+
+
+def test_with_a_watcher_the_desktop_layer_has_no_bottom_hint(layered):
+    w, _, _, _ = layered
+    assert not w.windowFlags() & BOTTOM
+    assert base_type(w) == Qt.WindowType.Tool
+
+
+def test_with_a_watcher_config_mode_does_not_rebuild_the_window(layered, monkeypatch):
+    """The desktop layer and config mode now share their flags."""
+    w, _, _, _ = layered
+    calls = []
+    monkeypatch.setattr(w, "setWindowFlags", lambda flags: calls.append(flags))
+    w.set_config_mode(True)
+    w.set_config_mode(False)
+    assert calls == []
+
+
+def test_leaving_config_mode_sends_the_widget_back_to_the_bottom(layered):
+    w, _, shell, _ = layered
+    w.set_config_mode(True)
+    shell.calls.clear()
+    w.set_config_mode(False)
+    assert shell.calls[0] == ("bottom", int(w.winId()))
+
+
+def test_desktop_to_normal_switches_the_watcher_off_without_a_rebuild(
+    layered, monkeypatch
+):
+    w, layer, _, _ = layered
+    calls = []
+    monkeypatch.setattr(w, "setWindowFlags", lambda flags: calls.append(flags))
+    w.apply_config(replace_stacking(w, STACKING_NORMAL))
+    assert not layer.enabled
+    assert calls == []
+
+
+def test_normal_to_desktop_switches_it_on_at_the_bottom(layered):
+    w, layer, shell, _ = layered
+    w.apply_config(replace_stacking(w, STACKING_NORMAL))
+    shell.calls.clear()
+    w.apply_config(replace_stacking(w, STACKING_DESKTOP))
+    assert layer.enabled
+    assert shell.calls[0] == ("bottom", int(w.winId()))
+
+
+# -- The Show desktop delay ------------------------------------------------
+
+
+def test_the_watcher_starts_with_the_configured_delay(qapp, monkeypatch, fake_shell,
+                                                      ticker_factory):
+    from terminal_widget import window as window_module
+    from terminal_widget.desktop_layer import DesktopLayer
+    from terminal_widget.window import WidgetWindow
+
+    monkeypatch.setattr(
+        window_module,
+        "create_desktop_layer",
+        lambda hwnd: DesktopLayer(fake_shell, hwnd, ticker_factory),
+    )
+    w = WidgetWindow(Config(show_desktop_delay_ms=600))
+    try:
+        assert w._desktop_layer is not None
+        assert w._desktop_layer.raise_delay_ms == 600
+    finally:
+        w.close()
+
+
+def test_a_new_delay_from_settings_reaches_the_watcher(layered):
+    w, layer, _, _ = layered
+    w.apply_config(replace(w.config, show_desktop_delay_ms=750))
+    assert layer.raise_delay_ms == 750

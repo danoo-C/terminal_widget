@@ -45,7 +45,7 @@ rather than `ticks_left`.
 | --- | --- | --- |
 | not watching | `LEAVE` | unchanged |
 | `desktop_above` and `elapsed >= raise_after` | `RAISE` | `raised=True`, watch over |
-| `elapsed + 1 > raise_after + WATCH_TICKS` | `LEAVE` | watch over |
+| `elapsed + 1 >= raise_after + WATCH_TICKS` | `LEAVE` | watch over |
 | otherwise | `LEAVE` | `elapsed + 1` |
 
 The check made at once when the watch starts is the tick at `elapsed == 0`.
@@ -53,6 +53,9 @@ The first timer tick is `elapsed == 1`, 50 ms later. So with a delay of 0 the
 behaviour is exactly what was proven in the experiment. With 250 ms
 (`raise_after == 5`) the widget comes up on the first tick at or after 250 ms
 where the desktop is above it.
+
+So a watch makes at most `raise_after + WATCH_TICKS` checks: 40 with no
+delay, as before. (Written as `>` at first, which would have made 41.)
 
 `raised` stays separate from `watching`, as now. "Watch over" means `desktop=0,
 elapsed=0, raise_after=0`.

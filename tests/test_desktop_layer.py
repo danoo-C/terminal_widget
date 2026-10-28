@@ -3,7 +3,7 @@
 All platform-free: the decisions are pure, and the Win32 side is either the
 FakeShell from conftest or Win32Shell over a fake user32. What Windows
 actually does is checked by hand, per
-docs/plans/show-desktop-always-on-top/04-verify-on-windows.md.
+docs/plans/show-desktop-always-on-top/06-verify-on-windows.md.
 """
 
 import ctypes
@@ -48,17 +48,18 @@ def fg(kind):
 ABOVE, BELOW = Tick(desktop_above=True), Tick(desktop_above=False)
 
 
-def run(*events, state=State()):
+def run(*events, state=State(), delay=0):
     """Feed events (Kinds for foreground changes, or Ticks) through decide()."""
     actions = []
     for event in events:
-        action, state = decide(fg(event) if isinstance(event, Kind) else event, state)
+        event = fg(event) if isinstance(event, Kind) else event
+        action, state = decide(event, state, raise_after=delay)
         actions.append(action)
     return actions, state
 
 
-WATCHING = State(desktop=DESKTOP, ticks_left=WATCH_TICKS)
-RAISED = State(raised=True, desktop=DESKTOP)
+WATCHING = State(desktop=DESKTOP)
+RAISED = State(raised=True)
 REVEALED = State(revealed=True)
 ANY_STATE = [State(), WATCHING, RAISED, REVEALED]
 
@@ -80,9 +81,14 @@ def test_the_desktop_while_raised_changes_nothing():
     assert decide(fg(Kind.DESKTOP), RAISED) == (Action.LEAVE, RAISED)
 
 
-def test_the_desktop_again_mid_watch_restarts_the_countdown():
-    half_done = State(desktop=DESKTOP, ticks_left=5)
+def test_the_desktop_again_mid_watch_restarts_the_count():
+    half_done = State(desktop=DESKTOP, elapsed=5, raise_after=3)
     assert decide(fg(Kind.DESKTOP), half_done) == (Action.LEAVE, WATCHING)
+
+
+def test_a_watch_starts_with_the_delay_it_is_given():
+    _, state = decide(fg(Kind.DESKTOP), State(), raise_after=5)
+    assert state == State(desktop=DESKTOP, raise_after=5)
 
 
 @pytest.mark.parametrize("state", [REVEALED, RAISED])
@@ -116,10 +122,50 @@ def test_the_desktop_above_the_widget_raises_it_and_ends_the_watch():
     assert decide(ABOVE, WATCHING) == (Action.RAISE, RAISED)
 
 
-def test_the_desktop_still_below_counts_down():
+def test_the_desktop_still_below_counts_on():
     action, state = decide(BELOW, WATCHING)
     assert action is Action.LEAVE
-    assert state.ticks_left == WATCH_TICKS - 1
+    assert state.elapsed == 1 and state.watching
+
+
+def test_a_tick_ignores_the_delay_argument():
+    """The delay is fixed when the watch starts; a tick does not read it."""
+    assert decide(ABOVE, WATCHING, raise_after=99) == (Action.RAISE, RAISED)
+
+
+# -- decide(): the Show desktop delay ----------------------------------------
+
+
+def test_with_no_delay_the_first_check_can_raise():
+    actions, _ = run(Kind.DESKTOP, ABOVE)
+    assert actions == [Action.LEAVE, Action.RAISE]
+
+
+def test_the_delay_holds_the_raise_back_until_it_has_passed():
+    """Desktop up from the first check; delay of 5 checks: raised on check 5."""
+    actions, state = run(Kind.DESKTOP, *[ABOVE] * 6, delay=5)
+    assert actions[1:] == [Action.LEAVE] * 5 + [Action.RAISE]
+    assert state.raised
+
+
+def test_a_desktop_rising_after_the_delay_raises_when_it_rises():
+    actions, _ = run(Kind.DESKTOP, *[BELOW] * 8, ABOVE, delay=5)
+    assert actions[-1] is Action.RAISE
+    assert Action.RAISE not in actions[:-1]
+
+
+def test_with_a_delay_the_wallpaper_gives_up_after_delay_plus_two_seconds():
+    _, state = run(Kind.DESKTOP, *[BELOW] * (5 + WATCH_TICKS - 1), delay=5)
+    assert state.watching
+    _, state = decide(BELOW, state)
+    assert not state.watching and not state.raised
+
+
+def test_an_app_during_the_delay_means_no_raise():
+    """Win+D, Win+D again before the delay is up: never on top."""
+    actions, state = run(Kind.DESKTOP, ABOVE, ABOVE, ABOVE, Kind.APP, ABOVE, delay=5)
+    assert Action.RAISE not in actions
+    assert state == State()
 
 
 # -- decide(): sequences -----------------------------------------------------
@@ -274,10 +320,33 @@ def test_a_failed_install_leaves_it_disabled_for_good(shell, ticker_factory, cap
     assert capsys.readouterr().err.count("Show desktop") == 1
 
 
-def test_enabling_acts_on_whatever_is_in_front(layer, shell):
+def test_switching_on_sends_the_widget_to_the_bottom_first(layer, shell):
+    """With no Qt bottom hint, nothing else puts it there: not startup, not
+    the end of config mode, not a fresh native window after a restack."""
+    layer.enabled = True  # nothing in front at all
+    assert shell.calls == [("bottom", WIDGET)]
+
+
+def test_enabling_then_acts_on_whatever_is_in_front(layer, shell):
+    """An app in front sends it to the bottom a second time. Harmless, and not
+    worth a special case."""
     shell.fg = APP
     layer.enabled = True
-    assert shell.calls == [("bottom", WIDGET)]
+    assert shell.calls == [("bottom", WIDGET), ("bottom", WIDGET)]
+
+
+def test_install_is_once(layer, shell):
+    assert layer.install() and layer.install()
+    assert shell.installs == 1
+
+
+def test_a_failed_install_says_so_once(shell, ticker_factory, capsys):
+    shell.install_ok = False
+    layer = DesktopLayer(shell, lambda: WIDGET, ticker_factory)
+    assert layer.install() is False
+    assert layer.install() is False
+    assert shell.installs == 1
+    assert capsys.readouterr().err.count("Show desktop") == 1
 
 
 def test_enabling_with_the_desktop_in_front_starts_a_watch(layer, shell, ticker):
@@ -352,9 +421,11 @@ def test_a_reveal_holds_through_activation(on, shell):
 
 def test_the_widget_handle_is_read_on_every_event(shell, ticker_factory):
     """A restack recreates the native window; a stored handle goes stale."""
-    handles = iter([WIDGET, WIDGET + 1])
-    layer = DesktopLayer(shell, lambda: next(handles), ticker_factory)
-    layer.enabled = True  # resync with fg 0: reads the first handle
+    current = [WIDGET]
+    layer = DesktopLayer(shell, lambda: current[0], ticker_factory)
+    layer.enabled = True
+    current[0] = WIDGET + 1
+    shell.calls.clear()
     shell.bring(APP)
     assert shell.calls == [("bottom", WIDGET + 1)]
 
@@ -417,6 +488,34 @@ def test_a_failing_check_ends_the_watch_instead_of_repeating(on, shell, ticker, 
     assert capsys.readouterr().err.count("GetWindow failed") == 1
 
 
+@pytest.mark.parametrize("ms, ticks", [(0, 0), (1, 1), (50, 1), (51, 2), (250, 5), (-10, 0)])
+def test_the_delay_rounds_up_to_whole_checks(layer, ms, ticks):
+    layer.raise_delay_ms = ms
+    assert layer.raise_delay_ms == max(0, ms)
+    assert layer._raise_after_ticks() == ticks
+
+
+def test_the_layer_holds_the_raise_back_by_the_delay(on, shell, ticker):
+    on.raise_delay_ms = 250
+    shell.above = True
+    shell.bring(DESKTOP)  # check 0: desktop already up, but too early
+    ticker.fire(4)
+    assert shell.calls == []
+    ticker.fire()
+    assert shell.calls == [("raise", WIDGET)]
+
+
+def test_changing_the_delay_mid_watch_keeps_the_running_watch(on, shell, ticker):
+    on.raise_delay_ms = 250
+    shell.above = True
+    shell.bring(DESKTOP)
+    on.raise_delay_ms = 0
+    ticker.fire(4)
+    assert shell.calls == []
+    ticker.fire()
+    assert shell.calls == [("raise", WIDGET)]
+
+
 # -- create() and the Windows binding ----------------------------------------
 #
 # Win32Shell's hook only runs on Windows and is checked by hand there. What
@@ -433,6 +532,25 @@ def test_no_layer_is_created_off_windows():
 def test_the_win32_shell_refuses_to_bind_off_windows():
     with pytest.raises(OSError):
         Win32Shell()
+
+
+def test_create_installs_the_hook_up_front(monkeypatch, fake_shell, qapp):
+    monkeypatch.setattr(desktop_layer, "is_windows", lambda: True)
+    monkeypatch.setattr(desktop_layer, "Win32Shell", lambda: fake_shell)
+    layer = create(lambda: WIDGET)
+    assert isinstance(layer, DesktopLayer)
+    assert fake_shell.installed and not layer.enabled
+    layer.close()
+
+
+def test_a_refused_hook_means_no_layer(monkeypatch, fake_shell):
+    """Then the window keeps Qt's bottom hint: a watcher that exists has to be
+    one that works, because the hint cannot come back without a restack."""
+    fake_shell.install_ok = False
+    monkeypatch.setattr(desktop_layer, "is_windows", lambda: True)
+    monkeypatch.setattr(desktop_layer, "Win32Shell", lambda: fake_shell)
+    assert create(lambda: WIDGET) is None
+    assert fake_shell.installs == 1
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="user32 would bind there")
