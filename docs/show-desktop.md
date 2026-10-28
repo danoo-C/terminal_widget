@@ -89,10 +89,16 @@ On every `EVENT_SYSTEM_FOREGROUND`, given the new foreground window `fg`:
 
 | `fg` is… | Action |
 | --- | --- |
-| the desktop window | Place the widget **directly above `fg`** |
+| the desktop window | Place the widget **directly above `fg`**, and remember it |
 | the widget itself, just revealed (tray Show, second launch) | Nothing: leave it where activation put it |
-| the widget itself, clicked by the user | Push it back to the bottom, without deactivating it (see *Decisions*) |
-| anything else | Push it back to the bottom |
+| the widget itself, clicked while the desktop is still the remembered one | Place it above that desktop again, so it doesn't sink under it |
+| the widget itself, clicked by the user otherwise | Push it back to the bottom, without deactivating it (see *Decisions*) |
+| another window of this process (the tray menu) | Nothing |
+| no window (Windows reports none mid-switch) | Nothing |
+| anything else | Push it back to the bottom, and forget the desktop |
+
+The full decision table, with the state it carries, is in
+[`plans/show-desktop/01-decision-logic.md`](plans/show-desktop/01-decision-logic.md).
 
 "Push it back to the bottom" is `SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`, the same call Qt makes when it
@@ -174,10 +180,10 @@ confirming on the target machine.
 ### Code layout
 
 - **`terminal_widget/desktop_layer.py`** (new). Two parts:
-  - A pure decision function, `classify(...) -> Action`, that takes plain
-    values (class name, has DefView child, is self, revealed) and returns one
-    of *above desktop / to bottom / leave*. It has no Win32 calls, so it can be
-    tested on Linux.
+  - A pure decision function, `decide(foreground, state) -> (action, state)`,
+    that takes what kind of window is in front plus the remembered state, and
+    returns one of *above desktop / to bottom / leave*. It has no Win32 calls,
+    so it can be tested on Linux.
   - A thin Win32 adapter: the `ctypes` declarations, hook install and removal,
     and `apply(action)`. Imported only when `is_windows()`.
 - **`terminal_widget/window.py`**. `WidgetWindow` owns one optional watcher,
@@ -202,6 +208,8 @@ z-order.
 - [ ] Win+D, then Win+D again: widget visible both times; apps come back
       *above* it
 - [ ] After Show desktop, open any app: widget goes back behind it
+- [ ] After Show desktop, click the widget and type: it stays visible
+- [ ] After Show desktop, open the tray menu: widget stays visible
 - [ ] Click empty wallpaper with apps open: widget does **not** jump above them
 - [ ] Click the widget while an app partly covers it: typing reaches the shell,
       and the widget stays behind the app (pushing it down must not take focus
