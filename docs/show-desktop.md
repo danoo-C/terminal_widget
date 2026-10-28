@@ -1,7 +1,9 @@
 # Surviving "Show desktop" on Windows
 
-**Status:** design only, no code yet. Fixes GitHub issue #6. Branch
-`issue-6-show-desktop`, 2026-10-28.
+**Status:** second design, no code for it yet. Fixes GitHub issue #6. Branch
+`issue-6-show-desktop`. The first design (2026-10-28) was built and tested on
+the target machine, and failed there; see *History* at the end. Plans for the
+second design are in [`plans/show-desktop-always-on-top/`](plans/show-desktop-always-on-top/README.md).
 
 ---
 
@@ -23,32 +25,34 @@ The widget is not closed and not minimized. It's covered.
 - The default `desktop` layer is `Qt::WindowStaysOnBottomHint`
   (`terminal_widget/window.py:61`). On Windows, Qt turns that into one
   `SetWindowPos(hwnd, HWND_BOTTOM)` call when the native window is created
-  (`issues.md:133-140`). It means "below every other window", and nothing keeps
-  it there afterwards.
-- Show desktop doesn't hide windows one by one. Explorer brings its desktop
-  window (the one that holds the icons, `SHELLDLL_DefView`, inside a `WorkerW`
-  or `Progman` window) to the top of the stack. That window covers the whole
-  screen and everything below it, and the widget is below it by design.
-- When another window takes the foreground, Explorer leaves show-desktop mode
-  and sends the desktop window back to the bottom, and the widget shows again.
-  That's why *any* window brings it back. A minimized window would stay
-  minimized.
+  (`issues.md:133-140`). Normally the widget then sits directly above Explorer's
+  desktop window (`Progman` on the target machine), next to Rainmeter's skins.
+- On Show desktop, Explorer makes `Progman` the foreground window and then, a
+  moment later, lifts it above every normal window. The widget is a normal
+  window, so it ends up underneath.
+- When an app comes forward again, Explorer sends `Progman` back to the bottom,
+  and the widget shows again. That's why *any* window brings it back.
 
-Nothing in the code watches for any of this. There's no native Windows code in
-the widget at all.
+All of this was observed on the target machine with read-only probes; the logs
+are summarised in [`plans/show-desktop/04-verify-on-windows.md`](plans/show-desktop/04-verify-on-windows.md)
+and under *History*.
 
 ## How Rainmeter does it
 
-Going from memory of Rainmeter's source (`Library/System.cpp`), so worth
-re-reading before implementing. "On Desktop" skins are not inside the desktop
-window. They're ordinary windows that Rainmeter keeps re-placing:
+Going from memory of Rainmeter's source (`Library/System.cpp`), now matching
+what the probes saw on the target machine:
 
-- normally, at the bottom of the stack, just above the desktop window;
-- when the foreground window turns out to be the desktop, above it;
-- when anything else takes the foreground, back to the bottom.
-
-It finds the desktop by window class (`WorkerW` / `Progman` with a
-`SHELLDLL_DefView` child) and reacts to foreground changes.
+- **Normally**, "On Desktop" skins are ordinary windows directly above the
+  desktop window. The probe saw exactly that: `RainmeterMeterWindow` windows
+  were the nearest ones above `Progman`.
+- **While the desktop is shown**, the skins are made **always-on-top**. The
+  probe saw them stop counting as normal windows over the desktop at that
+  moment.
+- **Detection is by the window stack, with a wait.** On a foreground change it
+  checks whether the desktop now sits above its own windows. Because Explorer's
+  rearranging lags behind the foreground change, it keeps checking for up to
+  about two seconds. As remembered, its source has a comment about waiting for
+  this; worth re-reading.
 
 ## Why not embed it inside the desktop
 
@@ -67,8 +71,14 @@ for a terminal than for a wallpaper:
 
 ## The design
 
-A small Windows-only watcher that moves the widget **within the normal (not
-topmost) window band** whenever the foreground window changes.
+A small Windows-only watcher, doing what Rainmeter does:
+
+1. When the desktop comes to the foreground, **watch the window stack** for up
+   to 2 seconds.
+2. If the desktop rises above the widget in that time, that's Show desktop:
+   **make the widget always-on-top.**
+3. When an **app** comes to the foreground, **send the widget back to the
+   bottom**, which also ends always-on-top.
 
 ### When it runs
 
@@ -76,178 +86,209 @@ Only when all of these hold:
 
 - `platform_info.is_windows()`;
 - the stacking actually in effect is `desktop`, i.e. `_stacking_hint()` returns
-  `WindowStaysOnBottomHint` (`window.py:335`). That excludes config mode, which
-  already joins the normal order, and the `normal` and `top` settings;
+  `WindowStaysOnBottomHint`. That excludes config mode, which already joins the
+  normal order, and the `normal` and `top` settings;
 - the window is visible.
 
-On Linux nothing changes: X11's `_NET_WM_STATE_BELOW` is held by the window
-manager, and Show desktop there is a separate question (see *Out of scope*).
+This part is unchanged from the first design and already built
+(`WidgetWindow._sync_desktop_layer()`).
+
+### What comes to the foreground
+
+Every `EVENT_SYSTEM_FOREGROUND` window is sorted into one of six kinds. The
+first design had five; *anything else* is now split in two, because the
+taskbar and the Start menu come forward *during* Show desktop and must not end
+it.
+
+| Kind | Meaning |
+| --- | --- |
+| **none** | No window. Windows reports this briefly mid-switch |
+| **desktop** | `WorkerW` or `Progman` holding a `SHELLDLL_DefView` child |
+| **self** | The widget's own window |
+| **own** | Another window of this process (the tray menu) |
+| **app** | A window Alt+Tab would list (see below) |
+| **shell** | Anything else: the taskbar, Start, flyouts, overlays |
+
+"A window Alt+Tab would list" is the usual test: visible, not cloaked, not a
+tool window (`WS_EX_TOOLWINDOW`), not `WS_EX_NOACTIVATE`, and either unowned or
+marked `WS_EX_APPWINDOW`. Known shell classes (`Shell_TrayWnd`,
+`Shell_SecondaryTrayWnd`, `Windows.UI.Core.CoreWindow` and a few more) count as
+**shell** whatever their styles say.
 
 ### What it does
 
-On every `EVENT_SYSTEM_FOREGROUND`, given the new foreground window `fg`:
+On a foreground change:
 
-| `fg` is… | Action |
-| --- | --- |
-| the desktop window | Place the widget **directly above `fg`**, and remember it |
-| the widget itself, just revealed (tray Show, second launch) | Nothing: leave it where activation put it |
-| the widget itself, clicked while the desktop is still the remembered one | Place it above that desktop again, so it doesn't sink under it |
-| the widget itself, clicked by the user otherwise | Push it back to the bottom, without deactivating it (see *Decisions*) |
-| another window of this process (the tray menu) | Nothing |
-| no window (Windows reports none mid-switch) | Nothing |
-| anything else | Push it back to the bottom, and forget the desktop |
+| New foreground | Widget state | Action |
+| --- | --- | --- |
+| none, own, shell | any | Nothing |
+| desktop | already raised | Nothing |
+| desktop | not raised | Start **watching** (below) |
+| self | revealed, or raised | Nothing |
+| self | otherwise | Back to the bottom (decision 1) |
+| app | any | Back to the bottom, stop watching, clear everything |
 
-The full decision table, with the state it carries, is in
-[`plans/show-desktop/01-decision-logic.md`](plans/show-desktop/01-decision-logic.md).
+**Watching** means checking every 50 ms, for at most 2 seconds, whether the
+desktop window is now *above* the widget in the stack. The first check runs at
+once, without waiting 50 ms.
 
-"Push it back to the bottom" is `SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
-SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)`, the same call Qt makes when it
-creates the window.
+- **Above:** that's Show desktop. Make the widget always-on-top
+  (`SetWindowPos(hwnd, HWND_TOPMOST, …, SWP_NOMOVE | SWP_NOSIZE |
+  SWP_NOACTIVATE)`), mark it **raised**, and stop watching.
+- **Still below after 2 seconds:** that was a click on the wallpaper, or
+  anything else that brought the desktop forward without lifting it. Stop
+  watching and do nothing. The widget stays behind your apps.
 
-"Directly above `fg`" means inserting the widget after whatever window sits just
-above the desktop: `prev = GetWindow(fg, GW_HWNDPREV)`, then
-`SetWindowPos(hwnd, prev or HWND_TOP, …)` with the same flags. That's what
-handles the two kinds of "desktop is in front":
+"Back to the bottom" is `SetWindowPos(hwnd, HWND_BOTTOM, …)` with the same
+flags. Windows documents that this also takes away always-on-top, so one call
+undoes a raise. `HWND_NOTOPMOST` is never needed.
 
-- **Show desktop / Win+D.** The desktop is at the top of the stack, so `prev` is
-  nothing and the widget goes to the top. It's visible.
-- **Clicking the empty wallpaper with apps open.** The desktop is in front for
-  input but still at the bottom of the stack, so the widget lands just above
-  it, still behind the apps. A blunt "desktop is in front, raise the widget"
-  rule would pop it over everything here.
+### Why "is the desktop above the widget?"
 
-### Why this keeps the earlier objection from applying
+It's the bug itself, measured directly, and it can't fire by mistake:
 
-`issues.md:142-150` rejected a `ctypes` `SetWindowPos` mainly because leaving the
-topmost band would make the real window style disagree with Qt's
-`windowFlags()`. This design never sets `HWND_TOPMOST` or `HWND_NOTOPMOST`, so
-`WS_EX_TOPMOST` is never touched. It only changes the widget's position in the
-normal band, which Qt doesn't track. `windowFlags()` stays accurate, and Qt's
-deliberate `raise_()` no-op under the bottom hint keeps working.
+- **Show desktop / Win+D** lifts the desktop above every normal window,
+  including the widget. The check fires within one tick of Explorer doing it.
+- **Clicking the wallpaper** makes the desktop the foreground window but leaves
+  it at the bottom of the stack, under the widget. The check never fires.
 
-Not using topmost also means the widget can never appear over a fullscreen game
-or a video.
+Rainmeter uses the same test, with its own helper window in place of the
+widget.
+
+### Always-on-top, and the objection it reverses
+
+The first design ruled always-on-top out (see decision 3 for the reversal). The
+reasons, and why each is acceptable now:
+
+- **Qt's `windowFlags()` would disagree with Windows** (`issues.md:142-150`).
+  True, but only while raised, and nothing reads the difference. Qt applies
+  stacking only when it creates the native window (a restack), and `raise_()`
+  is a no-op under the bottom hint. A restack creates a fresh window without
+  always-on-top anyway. To be safe, switching the watcher off while raised
+  sends the widget back to the bottom first.
+- **It could appear over a fullscreen game or a video.** It's raised only
+  after the desktop has come above it, which only happens while the desktop is
+  shown and no app is in front. The moment an app comes forward, it goes back
+  to the bottom.
+
+### What ends a raise
+
+| What happens | Foreground sequence | Result |
+| --- | --- | --- |
+| Win+D again | the restored app | app → bottom |
+| Click an app on the taskbar | taskbar (shell), then the app | app → bottom |
+| Alt+Tab | the switcher (shell), then the app | app → bottom |
+| Show desktop corner again | taskbar (shell), then the restored app | app → bottom |
+| Open the Start menu, then close it | Start (shell), desktop | stays raised |
+| Click the widget and type | self | stays raised |
+| Tray menu | own | stays raised |
+
+With no app to restore (nothing was open), the widget stays raised over an
+uncovered desktop. That looks the same as not raised, and the next app to come
+forward ends it.
 
 ### How Tray → Show stays working
 
-`bring_to_front()` (`window.py:391`) is the only way back to a covered widget,
-and it works by *activating* the widget. Activation fires a foreground event for
-the widget, and the "pushed back to the bottom" row would undo the reveal
-straight away.
-
-So `bring_to_front()` marks the widget as **revealed** before it activates it.
-While revealed, the widget's own foreground events are ignored. The flag clears
-on the next foreground event for any other window, and the normal rules apply
-again from there. The IPC path from a second launch (`__main__.py:107`) goes
-through `bring_to_front()`, so it gets this for free.
+Unchanged from the first design and already built. `bring_to_front()` marks the
+widget as **revealed** before activating it, so its own foreground event
+doesn't send it back down. The mark clears when an app comes forward.
 
 ### Lifecycle
 
-- **One hook per process, not per window.** `SetWinEventHook(EVENT_SYSTEM_FOREGROUND,
-  EVENT_SYSTEM_FOREGROUND, 0, callback, 0, 0, WINEVENT_OUTOFCONTEXT)`.
-  Out-of-context hooks are delivered through the installing thread's message
-  queue, which Qt's event loop already pumps, so the callback runs on the GUI
-  thread and needs no locking. Don't pass `WINEVENT_SKIPOWNPROCESS`: the
-  widget's own foreground events are needed for the click and reveal rows.
-- **Read the HWND fresh on every event** with `int(self.winId())`. A restack
-  destroys and recreates the native window (`window.py:354`), so a stored HWND
-  would go stale. Because the hook isn't tied to a window, it never needs
-  reinstalling.
-- **Re-check after anything that changes whether it should run**: the end of
-  `_restack()`, `set_config_mode(False)`, and a `stacking` change in
-  `apply_config()`. Each runs the table once against the current
-  `GetForegroundWindow()`, so closing settings while the desktop is shown puts
-  the widget in the right place without waiting for the next event.
-- **Keep the ctypes callback object alive** for as long as the hook is
-  installed. If it's garbage-collected, the hook calls freed memory and the
-  process crashes.
-- **Unhook on close** (`UnhookWinEvent`), before `closed` is emitted.
-- **Explorer restarts need nothing.** The desktop is identified by class name on
-  every event, and no handle is cached. With no Explorer running nothing
-  matches, and the widget behaves as it does today.
+Unchanged from the first design and already built, plus one timer:
 
-### Spotting the desktop window
-
-`fg` counts as the desktop when its class is `WorkerW` or `Progman` **and** it
-has a `SHELLDLL_DefView` child (`FindWindowExW(fg, 0, "SHELLDLL_DefView", None)`).
-The child check matters because Explorer keeps several `WorkerW` windows that
-aren't the desktop.
-
-Windows 11 24H2 changed which of the two holds the icons, so checking both
-classes is deliberate. Which one actually takes the foreground on Win+D needs
-confirming on the target machine.
+- One `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` per process, out-of-context,
+  so events arrive on Qt's GUI thread. The ctypes callback is kept alive for as
+  long as the hook is installed.
+- The widget's HWND is read fresh on every event, because a restack replaces
+  the native window.
+- **New: one 50 ms `QTimer`**, running only while watching (at most 2 seconds
+  after the desktop comes forward). It lives on the GUI thread like the hook.
+- Switching the watcher off stops the timer, and sends the widget back to the
+  bottom if it was raised.
+- Unhooked on close, before `closed` is emitted.
 
 ### Code layout
 
-- **`terminal_widget/desktop_layer.py`** (new). Two parts:
-  - A pure decision function, `decide(foreground, state) -> (action, state)`,
-    that takes what kind of window is in front plus the remembered state, and
-    returns one of *above desktop / to bottom / leave*. It has no Win32 calls,
-    so it can be tested on Linux.
-  - A thin Win32 adapter: the `ctypes` declarations, hook install and removal,
-    and `apply(action)`. Imported only when `is_windows()`.
-- **`terminal_widget/window.py`**. `WidgetWindow` owns one optional watcher,
-  with an `enabled` property set from the conditions in *When it runs*, plus the
-  `revealed` flag in `bring_to_front()`. No change to flags, geometry or
-  opacity code.
-- No new dependencies. `ctypes` comes with Python, and `pywin32` isn't needed.
+Changes to what's already built:
 
-Rough size: 100–150 lines of module, about 20 lines in `window.py`, plus tests.
+- **`terminal_widget/desktop_layer.py`**
+  - `Kind`: `OTHER` splits into `APP` and `SHELL`.
+  - `decide()` handles two kinds of input, a foreground change and a watch
+    tick. `State` gains `raised` and a tick countdown. `ABOVE_DESKTOP` gives way
+    to `RAISE`, and the state no longer needs to remember the desktop's handle
+    for placement, only for the stack check.
+  - `DesktopLayer` gains a ticker (a `QTimer` in production, a fake in tests).
+  - `Win32Shell`: `classify()` learns app versus shell; new
+    `desktop_above(widget, desktop)` and `raise_topmost(widget)`.
+    `place_above()` goes, together with its topmost workaround and tests.
+- **`terminal_widget/window.py`**: nothing expected beyond what step 3 built.
 
 ## Testing
 
-**Automated (any OS):** table tests for `classify()` covering every row above,
-including the revealed flag and the wallpaper-click case. Window tests asserting
-the watcher's `enabled` follows config mode and stacking changes, with the Win32
-adapter replaced by a fake. Nothing in the offscreen suite can exercise the real
-z-order.
+**Automated (any OS):** every row of both tables, the watch countdown, the
+wallpaper case (desktop never rises, so no raise), a raise then each way of
+ending it, and switching off while raised. The Win32 parts that can be faked
+(app versus shell classification, the stack walk) are tested against a fake
+`user32`, as `place_above` was.
 
-**By hand on Windows:**
+**By hand on Windows**, with the debug launcher from the first round:
 
-- [ ] Show desktop button: widget stays visible
-- [ ] Win+D, then Win+D again: widget visible both times; apps come back
-      *above* it
-- [ ] After Show desktop, open any app: widget goes back behind it
-- [ ] After Show desktop, click the widget and type: it stays visible
-- [ ] After Show desktop, open the tray menu: widget stays visible
-- [ ] Click empty wallpaper with apps open: widget does **not** jump above them
+- [ ] Show desktop corner: widget stays visible (a blink is acceptable, see
+      below)
+- [ ] Win+D, then Win+D again: visible both times; apps come back *above* it
+- [ ] After Show desktop, click an app on the taskbar: widget goes back behind
+      it
+- [ ] After Show desktop, Alt+Tab to an app: same
+- [ ] After Show desktop, open and close the Start menu: widget stays visible
+- [ ] After Show desktop, click the widget and type: stays visible
+- [ ] After Show desktop, open the tray menu: stays visible
+- [ ] Click empty wallpaper with apps open: widget does **not** jump above them,
+      even after 2 seconds
 - [ ] Click the widget while an app partly covers it: typing reaches the shell,
-      and the widget stays behind the app (pushing it down must not take focus
-      away from it)
-- [ ] Tray → Show over a covered widget: it comes forward and stays there until
-      another window is used
-- [ ] Second launch (IPC show): same as Tray → Show
-- [ ] Open settings (config mode) and close it: watcher off, then on again, and
-      no jumping during the restack
+      and the widget stays behind the app
+- [ ] Tray → Show over a covered widget: comes forward, stays until an app is
+      used
+- [ ] Open settings during Show desktop, then close it: no leftover
+      always-on-top
 - [ ] `normal` and `top` layers: behave exactly as before
-- [ ] Win+M (minimize all): note what happens. A tool window with no minimize
-      box is expected to stay put
+- [ ] Fullscreen game or video, then Win+D and back: the widget never ends up
+      over it
 - [ ] Restart `explorer.exe`: Show desktop still works afterwards
-- [ ] Which class takes the foreground on Win+D on this build: `WorkerW` or
-      `Progman`
-- [ ] Fullscreen app or game, then Win+D: no flicker over it on the way back
+- [ ] How long the widget blinks out on Show desktop, if at all
+
+**The blink:** Explorer lifts the desktop, and only then can the watcher see it
+and raise the widget. That's up to one 50 ms tick, plus however long Explorer
+takes to draw. If that's visible and bothersome, the tick can be shortened;
+the stack check is cheap.
 
 ## Decisions
-
-Both settled on 2026-10-28.
 
 1. **Clicking a partly covered widget pushes it back to the bottom**, as
    Rainmeter does. You can type into it, but it stays behind the app covering
    it. Someone who picked the `desktop` layer asked for "never above my apps",
    and the `normal` layer already gives click-to-front. This also answers the
-   one-shot question in `issues.md:182-184`: the desktop layer is no longer
-   one-shot.
+   one-shot question in `issues.md:182-184`. *(2026-10-28, unchanged.)*
 
-   *Rejected:* letting a click bring it forward, as it does today, until another
-   window is used.
-2. **Foreground event hook, not polling.** `SetWinEventHook` reacts the moment
-   the foreground changes, so Win+D has no visible delay, and the process
-   sleeps between events.
+   *Rejected:* letting a click bring it forward until another window is used.
+2. **The foreground event hook is the trigger, plus a short bounded check
+   after a desktop event.** The hook still decides *when* to look. The 50 ms
+   check runs only for the 2 seconds after the desktop comes forward, because
+   the target machine showed Explorer lifting the desktop *after* the event.
+   *(2026-10-28; amended the same day after the first design failed.)*
 
-   *Rejected:* a ~250 ms `QTimer` polling `GetForegroundWindow()`. It's simpler,
-   but it adds a visible delay on Win+D and wakes the process for nothing.
-   Polling would come back only if the hook turns out to be unreliable on a
-   real machine.
+   *Rejected:* continuous polling. It isn't needed, because every Show desktop
+   observed started with the desktop coming to the foreground.
+3. **Always-on-top while the desktop is shown.** This reverses the first
+   design's "never always-on-top" rule. *(2026-10-28, after the first design
+   failed.)* On the target machine, placing the widget directly above the
+   desktop in the normal band lost to Explorer within one check. Explorer lifts
+   the desktop above every normal window, so no normal-band placement can win.
+   Rainmeter's skins survive the same Show desktop on the same machine by being
+   always-on-top.
+
+   *Rejected:* staying in the normal band and re-placing the widget repeatedly.
+   That fights Explorer on every tick and still loses between ticks.
 
 ## Out of scope
 
@@ -258,3 +299,31 @@ Both settled on 2026-10-28.
   down above.
 - **Virtual desktops.** Tool windows already follow Windows' own rules there,
   and this change doesn't touch that.
+- **The desktop rising with no foreground change.** Seen once during a restore
+  in the first round (8.86 s in the log below), when the widget wasn't raised,
+  and it ended a moment later when the restored app came forward. If it shows
+  up as a problem, a slow background check (once a second) would cover it.
+
+## History: the first design, and why it failed
+
+The first design (plans in [`plans/show-desktop/`](plans/show-desktop/README.md),
+steps 1–3 built) never used always-on-top. On a desktop foreground event it
+inserted the widget directly above the desktop *within the normal band*, and
+treated every other foreign window as "anything else, back to the bottom".
+
+Run on the target machine with a debug launcher logging every step:
+
+- The hook installed, the watcher switched on, and Win+D and the corner were
+  both seen as `Progman -> DESKTOP`. Every `SetWindowPos` succeeded.
+- At 14.07 s the widget was placed directly above the desktop. The very next
+  check already showed it **below** the desktop. Explorer finishes lifting the
+  desktop *after* the foreground event, over every normal window.
+- At 8.86 s the widget dropped below the desktop with no event at all, while
+  Explorer was restoring apps.
+- An earlier probe had also shown the taskbar coming to the foreground at the
+  start of a corner click. The first design treated that as "anything else" and
+  would have sent the widget to the bottom at the wrong moment.
+
+Those three findings are decisions 2 and 3 and the app/shell split above. The
+first design's state handling, hook, window integration and tests are kept;
+only the decisions and the Windows placement change.

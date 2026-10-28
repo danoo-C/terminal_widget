@@ -1,5 +1,11 @@
 # Plans: surviving "Show desktop" on Windows
 
+> **Superseded.** Steps 1–3 were built. Step 4 showed on the target machine
+> that staying in the normal window band can't beat Explorer (see *History* in
+> [`docs/show-desktop.md`](../../show-desktop.md)). The work continues in
+> [`../show-desktop-always-on-top/`](../show-desktop-always-on-top/README.md).
+> Kept as the record of round one.
+
 Implementation plans for the design in [`docs/show-desktop.md`](../../show-desktop.md),
 which fixes GitHub issue #6. Read the design first: these plans say *how* and
 *in what order*, and don't repeat the *why*.
